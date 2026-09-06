@@ -180,6 +180,9 @@ pub struct PnlArgs {
     /// total | day | week | month | group | meta:<key>
     #[arg(long, default_value = "total")]
     pub by: String,
+    /// JSON file {"<group>": "<amount>", ...} valuing open positions; adds open_value and mtm
+    #[arg(long, value_name = "FILE")]
+    pub marks: Option<std::path::PathBuf>,
 }
 
 #[derive(Args, Debug)]

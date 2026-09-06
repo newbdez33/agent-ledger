@@ -50,6 +50,8 @@ pub enum LedgerError {
     InvalidMeta(String),
     #[error("invalid pnl bucket '{0}' (expected total, day, week, month, group or meta:<key>)")]
     InvalidBucket(String),
+    #[error("mark for group '{group}' spans more than one pnl row ({rows}); a marked group must fall in exactly one row")]
+    MarkAmbiguous { group: String, rows: String },
     #[error("ref '{reference}' on '{account}' already exists as entry {existing_id} ({existing_kind} {existing_amount})")]
     RefConflict {
         account: String,
@@ -99,6 +101,7 @@ impl LedgerError {
             InvalidGroup => "invalid_group",
             InvalidMeta(_) => "invalid_meta",
             InvalidBucket(_) => "invalid_bucket",
+            MarkAmbiguous { .. } => "mark_ambiguous",
             RefConflict { .. } => "ref_conflict",
             AlreadyReversed(..) => "already_reversed",
             CannotReverseReversal(_) => "cannot_reverse_reversal",

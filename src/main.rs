@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use agent_ledger::ledger::{
-    AddRequest, HistoryFilter, PnlBucket, PnlFilter, ReconcileRequest, TransferRequest,
+    AddRequest, HistoryFilter, Marks, PnlBucket, PnlFilter, ReconcileRequest, TransferRequest,
 };
 use agent_ledger::model::Kind;
 use agent_ledger::{Ledger, LedgerError};
@@ -44,6 +44,15 @@ fn main() {
             std::process::exit(e.exit_code());
         }
     }
+}
+
+fn read_marks(path: &std::path::Path) -> Result<String, LedgerError> {
+    std::fs::read_to_string(path).map_err(|e| {
+        LedgerError::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {e}", path.display()),
+        ))
+    })
 }
 
 fn db_path(cli: &Cli) -> PathBuf {
@@ -124,16 +133,24 @@ fn run(cli: Cli) -> Result<Output, LedgerError> {
             )?)
         }
         Command::Group { id } => Output::Group(ledger.group(&id)?),
-        Command::Pnl(p) => Output::Pnl {
-            accounts: ledger.pnl(
-                p.account.as_deref(),
-                &PnlFilter {
-                    since: p.since,
-                    until: p.until,
-                    by: PnlBucket::parse(&p.by)?,
-                },
-            )?,
-        },
+        Command::Pnl(p) => {
+            let marks = match &p.marks {
+                Some(path) => Some(Marks::parse(&read_marks(path)?)?),
+                None => None,
+            };
+            Output::Pnl {
+                marked: marks.is_some(),
+                accounts: ledger.pnl(
+                    p.account.as_deref(),
+                    &PnlFilter {
+                        since: p.since,
+                        until: p.until,
+                        by: PnlBucket::parse(&p.by)?,
+                        marks,
+                    },
+                )?,
+            }
+        }
         Command::Reconcile(r) => Output::Reconcile(ledger.reconcile(&ReconcileRequest {
             account: r.account,
             observed: r.observed,

@@ -40,6 +40,7 @@ ledger balance
 ledger history poly-usdc --limit 20
 ledger group arb:btc-5m:0310            # both legs, net per currency
 ledger pnl poly-usdc --since 2026-09-01 --by meta:strategy
+ledger pnl poly-usdc --by group --marks marks.json   # {"arb:btc-5m:0310": "48.00"}: adds open_value, mtm
 ledger reconcile poly-usdc --observed 124.70 --source polymarket-onchain
 ledger reverse 12 --memo "double counted"
 cat backfill.jsonl | ledger import --dry-run
@@ -53,7 +54,7 @@ ledger export poly-usdc --format csv
 - **Idempotent for retrying agents.** Pass `--ref` with an order id or tx hash; replaying the same entry returns the original with `"duplicate": true` and exit 0. A replay with a different amount is a hard error.
 - **Reconciliation built in.** Tell the ledger the balance you actually observed; it stores a snapshot and posts an adjustment so the book matches reality, and the diff is on record.
 - **Multiple accounts, multiple currencies.** One file can hold `poly-usdc`, `kalshi-usd`, `agent-x-eth`; transfers between same-currency accounts are atomic two-leg entries.
-- **Positions, not just cash lines.** Tag every leg of a trade or a cross-venue arbitrage with one `--group`; `group <id>` shows the position's net per currency. Attach structured attributes (market, side, price, strategy) as `--meta` JSON and bucket realized PnL by them with `pnl --by meta:strategy`. Capital movements never count as PnL.
+- **Positions, not just cash lines.** Tag every leg of a trade or a cross-venue arbitrage with one `--group`; `group <id>` shows the position's net per currency. Attach structured attributes (market, side, price, strategy) as `--meta` JSON and bucket realized PnL by them with `pnl --by meta:strategy`. Capital movements never count as PnL. Hand `pnl --marks` the venue's value of each open group and every row also shows `open_value` and `mtm`; the ledger itself never values a position.
 - **Backfill in one shot.** `import` reads JSON Lines from stdin and applies them in one transaction, skipping duplicates and rolling back on the first conflict. `--dry-run` shows what would happen.
 - **Machine and human output.** Aligned tables by default, `--json` for agents, exit codes 0 / 1 / 2 for success / usage / domain error.
 

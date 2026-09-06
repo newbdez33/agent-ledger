@@ -7,6 +7,7 @@ Open work is tracked as GitHub issues; this file is the map. Shipped: **v0.1** (
 - [x] Release v0.1.0 tag — https://github.com/newbdez33/agent-ledger/issues/1
 - [x] `account add` idempotent on identical re-run — https://github.com/newbdez33/agent-ledger/issues/2 (from the skill baseline test)
 - [ ] `reconcile` retries must not append duplicate snapshots — https://github.com/newbdez33/agent-ledger/issues/3 (from the skill baseline test)
+- [x] `pnl --marks` values open groups and adds `open_value` / `mtm` — https://github.com/newbdez33/agent-ledger/issues/4 (from poly's first trading day)
 
 ## Waiting on the poly integration
 
