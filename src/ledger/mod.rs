@@ -5,9 +5,11 @@
 
 mod accounts;
 mod entries;
+mod pnl;
 mod reports;
 
 pub use entries::{AddRequest, TransferRequest};
+pub use pnl::{PnlBucket, PnlFilter};
 pub use reports::HistoryFilter;
 
 use std::path::Path;
