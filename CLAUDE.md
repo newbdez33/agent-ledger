@@ -7,6 +7,7 @@ Claude Code skill in `skill/ledger/`. Read these first:
 - `docs/plans/2026-09-06-agent-ledger.md` — how v0.1 was built, task by task
 - `skill/ledger/SKILL.md` — what agents are told; it must stay true to the CLI's behavior
 - `README.md` — install and usage
+- `TODO.md` — open work, mapped to GitHub issues (`gh issue list`)
 
 ## Conventions
 
