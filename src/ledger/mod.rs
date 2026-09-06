@@ -1,15 +1,15 @@
 //! The `Ledger` type and row-level helpers shared by every operation.
 
-// Helpers land before their callers; removed once import (Task 10) is in.
-#![allow(dead_code)]
-
 mod accounts;
 mod entries;
+mod import;
 mod pnl;
+mod reconcile;
 mod reports;
 
 pub use entries::{AddRequest, TransferRequest};
 pub use pnl::{PnlBucket, PnlFilter};
+pub use reconcile::ReconcileRequest;
 pub use reports::HistoryFilter;
 
 use std::path::Path;
