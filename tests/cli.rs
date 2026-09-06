@@ -624,3 +624,49 @@ fn pnl_marks_add_open_value_and_mtm() {
         .stderr(predicates::str::contains("io_error"))
         .stderr(predicates::str::contains("nope.json"));
 }
+
+#[test]
+fn pnl_table_labels_the_null_bucket_null_except_under_by_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l.db");
+    with_account(&db);
+    ledger(&db)
+        .args(["add", "poly-usdc", "-5", "--kind", "trade"])
+        .assert()
+        .success();
+    ledger(&db)
+        .args([
+            "add",
+            "poly-usdc",
+            "-2",
+            "--kind",
+            "fee",
+            "--group",
+            "g1",
+            "--meta",
+            r#"{"strategy":"arb"}"#,
+        ])
+        .assert()
+        .success();
+    let table = |by: &str| {
+        String::from_utf8(
+            ledger(&db)
+                .args(["pnl", "poly-usdc", "--by", by])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    };
+    for by in ["group", "meta:strategy"] {
+        let t = table(by);
+        assert!(t.lines().any(|l| l.starts_with("null ")), "--by {by}:\n{t}");
+        assert!(
+            !t.lines().any(|l| l.starts_with("total")),
+            "--by {by}:\n{t}"
+        );
+    }
+    let t = table("total");
+    assert!(t.lines().any(|l| l.starts_with("total ")), "{t}");
+    assert!(!t.contains("null"), "{t}");
+}

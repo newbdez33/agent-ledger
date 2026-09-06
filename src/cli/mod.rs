@@ -82,6 +82,7 @@ pub enum AccountCommand {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
+    /// Account name (case-insensitive)
     pub account: String,
     /// Signed decimal; positive is an inflow
     #[arg(allow_negative_numbers = true)]
@@ -93,6 +94,7 @@ pub struct AddArgs {
     /// External id (order id, tx hash); unique per account, makes the call idempotent
     #[arg(long = "ref")]
     pub reference: Option<String>,
+    /// Free-text note
     #[arg(long)]
     pub memo: Option<String>,
     /// When it happened (RFC 3339 or YYYY-MM-DD); default now
@@ -156,10 +158,11 @@ pub struct HistoryArgs {
     /// Most recent N entries; 0 for all
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
-    /// Inclusive lower bound on entry ts (RFC 3339 or YYYY-MM-DD)
+    /// Inclusive lower bound on entry ts (RFC 3339 or YYYY-MM-DD, taken as 00:00 UTC)
     #[arg(long)]
     pub since: Option<String>,
-    /// Inclusive upper bound on entry ts
+    /// Inclusive upper bound on entry ts (RFC 3339 or YYYY-MM-DD, taken as 00:00 UTC, so a
+    /// bare date excludes that day)
     #[arg(long)]
     pub until: Option<String>,
     /// Only this kind (any of the nine, including transfer and reversal)
@@ -172,9 +175,13 @@ pub struct HistoryArgs {
 
 #[derive(Args, Debug)]
 pub struct PnlArgs {
+    /// Account name; every account when omitted
     pub account: Option<String>,
+    /// Inclusive lower bound on entry ts (RFC 3339 or YYYY-MM-DD, taken as 00:00 UTC)
     #[arg(long)]
     pub since: Option<String>,
+    /// Inclusive upper bound on entry ts (RFC 3339 or YYYY-MM-DD, taken as 00:00 UTC, so a
+    /// bare date excludes that day; for today pass --since alone)
     #[arg(long)]
     pub until: Option<String>,
     /// total | day | week | month | group | meta:<key>
@@ -206,6 +213,7 @@ pub struct ReconcileArgs {
 #[derive(Args, Debug)]
 pub struct SnapshotsArgs {
     pub account: String,
+    /// Most recent N snapshots; 0 for all
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
 }

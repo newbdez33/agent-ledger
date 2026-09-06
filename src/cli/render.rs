@@ -96,7 +96,11 @@ pub fn render(out: &Output) -> String {
             }
             s
         }
-        Output::Pnl { accounts, marked } => {
+        Output::Pnl {
+            accounts,
+            marked,
+            total,
+        } => {
             let mut headers = vec![
                 "bucket",
                 "trades",
@@ -110,6 +114,7 @@ pub fn render(out: &Output) -> String {
                 headers.extend(["open_value", "mtm"]);
             }
             let right: Vec<usize> = (1..headers.len()).collect();
+            let null_label = if *total { "total" } else { "null" };
             let mut s = String::new();
             for a in accounts {
                 s.push_str(&format!("{} ({})\n", a.account, a.currency));
@@ -119,7 +124,7 @@ pub fn render(out: &Output) -> String {
                         .iter()
                         .map(|r| {
                             let mut cells = vec![
-                                r.bucket.clone().unwrap_or_else(|| "total".into()),
+                                r.bucket.clone().unwrap_or_else(|| null_label.into()),
                                 r.trades.clone(),
                                 r.settlements.clone(),
                                 r.fees.clone(),

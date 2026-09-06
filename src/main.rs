@@ -138,14 +138,16 @@ fn run(cli: Cli) -> Result<Output, LedgerError> {
                 Some(path) => Some(Marks::parse(&read_marks(path)?)?),
                 None => None,
             };
+            let by = PnlBucket::parse(&p.by)?;
             Output::Pnl {
                 marked: marks.is_some(),
+                total: by == PnlBucket::Total,
                 accounts: ledger.pnl(
                     p.account.as_deref(),
                     &PnlFilter {
                         since: p.since,
                         until: p.until,
-                        by: PnlBucket::parse(&p.by)?,
+                        by,
                         marks,
                     },
                 )?,
