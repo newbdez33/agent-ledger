@@ -49,7 +49,7 @@ docs/specs/       Design documents (this file).
 docs/plans/       Implementation plans.
 ```
 
-Dependencies: `rusqlite` (bundled SQLite), `clap` (derive), `rust_decimal`, `chrono`, `serde`/`serde_json`, `thiserror`, `anyhow`, `uuid` (transfer group ids), `dirs` (home directory). Dev: `assert_cmd`, `predicates`, `tempfile`.
+Dependencies: `rusqlite` (bundled SQLite), `clap` (derive, env), `rust_decimal`, `chrono`, `serde`/`serde_json`, `thiserror`, `uuid` (transfer group ids), `dirs` (home directory). Dev: `assert_cmd`, `predicates`, `tempfile`.
 
 ### Storage
 
@@ -143,13 +143,13 @@ Entries without `--ref` are never deduplicated.
 
 **Reversal.** `reverse <entry-id>` writes a `reversal` entry on the same account with `amount = -original.amount`, `reverses_id = original.id`, `group_id = original.group_id`, `ts = now`. If the original is a `transfer` leg, its sibling leg is reversed in the same transaction, because a transfer is one movement. `reverse --group <id>` reverses every entry in the group that is neither a reversal nor already reversed, in one transaction; `nothing_to_reverse` if there are none. Rejected when a target is itself a `reversal` (`cannot_reverse_reversal`) or already has a reversal (`already_reversed`, guaranteed by the unique index). To undo a reversal, add the entry again.
 
-**Reconcile.** `reconcile <account> --observed <amount> [--ts <t>]` runs in one transaction with `t` defaulting to now: `book = SUM(amount) WHERE ts <= t`, `diff = observed - book`, insert a snapshot at `t`. If `diff != 0` and `--no-adjust` is absent, insert an `adjustment` entry with `amount = diff`, `ts = t`, memo `reconcile: observed <o>, book <b>`, and set `snapshot.adjustment_entry_id`. The book balance as of `t` therefore equals the observed balance after every reconcile unless the caller opts out. `snapshots <account>` lists past snapshots.
+**Reconcile.** `reconcile <account> --observed <amount> [--ts <t>]` runs in one transaction with `t` defaulting to now: `book = SUM(amount) WHERE ts <= t`, `diff = observed - book`, insert a snapshot at `t`. If `diff != 0` and `--no-adjust` is absent, insert an `adjustment` entry with `amount = diff`, `ts = t`, memo `reconcile: observed <o>, book <b>`, and store its id in `snapshot.adjustment_entry_id`; the adjustment is inserted before the snapshot row because snapshots are append-only. The book balance as of `t` therefore equals the observed balance after every reconcile unless the caller opts out. `snapshots <account>` lists past snapshots.
 
 **Balance.** `balance` lists every account with its current balance. `balance <account> [--at <ts>]` sums entries with `ts <= at`. Both use `ts`, not `recorded_at`.
 
 **History.** Entries of one account ordered by `(ts, id)` with a running balance computed by a window function (`SUM(amount) OVER (ORDER BY ts, id)`), never stored. `--since`/`--until` filter on `ts`, `--kind` filters on kind, `--group` filters on group, `--limit N` (default 50, `0` for unlimited) keeps the most recent N of the filtered set and prints them oldest first. The running balance is computed over the whole account before filtering, so it is always the true balance after that entry.
 
-**PnL.** `pnl [<account>] [--since] [--until] [--by day|week|month|group|meta:<key>]` reports realized cash PnL. Capital movements are excluded: `deposit`, `withdrawal`, `transfer`, and reversals of those. Every other entry counts, and a `reversal` counts under the kind of the entry it reverses. Columns: `trades`, `settlements`, `fees`, `adjustments`, `other`, `net`. Without `--by` there is one row per account; with `--by`, one row per bucket, where `day`/`week`/`month` bucket on `ts` (`%Y-%m-%d`, `%Y-W%W`, `%Y-%m`), `group` buckets on `group_id`, and `meta:<key>` buckets on `json_extract(meta, '$.<key>')`. Entries without the bucket value fall in a `null` bucket. Without `<account>` every account is reported, each in its own currency.
+**PnL.** `pnl [<account>] [--since] [--until] [--by total|day|week|month|group|meta:<key>]` reports realized cash PnL. Capital movements are excluded: `deposit`, `withdrawal`, `transfer`, and reversals of those. Every other entry counts, and a `reversal` counts under the kind of the entry it reverses. Columns: `trades`, `settlements`, `fees`, `adjustments`, `other`, `net`. Without `--by` there is one row per account; with `--by`, one row per bucket, where `day`/`week`/`month` bucket on `ts` (`%Y-%m-%d`, `%Y-W%W`, `%Y-%m`), `group` buckets on `group_id`, and `meta:<key>` buckets on `json_extract(meta, '$.<key>')`. Entries without the bucket value fall in a `null` bucket. Without `<account>` every account is reported, each in its own currency.
 
 **Import.** `import [--dry-run]` reads JSON Lines from stdin, one entry per line:
 
@@ -179,7 +179,7 @@ ledger [--db <path>] [--json] [--actor <name>] <command>
   history <account> [--limit <n>] [--since <rfc3339>] [--until <rfc3339>]
       [--kind <kind>] [--group <id>]
   group <id>
-  pnl [<account>] [--since <rfc3339>] [--until <rfc3339>] [--by day|week|month|group|meta:<key>]
+  pnl [<account>] [--since <rfc3339>] [--until <rfc3339>] [--by total|day|week|month|group|meta:<key>]
   reconcile <account> --observed <amount> [--source <text>] [--no-adjust] [--ts <rfc3339>]
   snapshots <account> [--limit <n>]
   import [--dry-run]
@@ -246,7 +246,7 @@ Import errors add `"line": <n>` to the object.
 | 1 | usage error, I/O error, database error |
 | 2 | domain error, one of the codes below |
 
-Domain error codes: `account_not_found`, `account_exists`, `entry_not_found`, `group_not_found`, `currency_mismatch`, `precision_exceeded`, `invalid_amount`, `zero_amount`, `invalid_sign`, `invalid_kind`, `invalid_timestamp`, `invalid_group`, `invalid_meta`, `ref_conflict`, `already_reversed`, `cannot_reverse_reversal`, `nothing_to_reverse`.
+Domain error codes (exit 2): `account_not_found`, `account_exists`, `invalid_account_name`, `invalid_currency`, `same_account`, `entry_not_found`, `group_not_found`, `currency_mismatch`, `precision_exceeded`, `invalid_amount`, `zero_amount`, `invalid_sign`, `invalid_kind`, `invalid_timestamp`, `invalid_group`, `invalid_meta`, `invalid_bucket`, `invalid_json`, `ref_conflict`, `already_reversed`, `cannot_reverse_reversal`, `nothing_to_reverse`. Infrastructure codes (exit 1): `database_error`, `io_error`.
 
 ### Companion skill
 
