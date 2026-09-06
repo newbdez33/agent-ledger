@@ -4,9 +4,21 @@ An append-only, SQLite-backed ledger that AI agents drive from the shell.
 
 Agents that move money have wallets but no books. A wallet says what the balance is; it does not say why it changed, or whether what the agent thinks happened matches what the chain or exchange reports. `ledger` is the book: one binary, one file, JSON in and out, idempotent writes, and an audit trail that no caller can rewrite.
 
-**Status:** design stage. The spec is written; no code yet. See [docs/specs/2026-09-06-agent-ledger-design.md](docs/specs/2026-09-06-agent-ledger-design.md).
+**Status:** v0.1, usable. `make install` builds the binary and links the companion skill. Design: [docs/specs/2026-09-06-agent-ledger-design.md](docs/specs/2026-09-06-agent-ledger-design.md).
 
-## What it will look like
+## Install
+
+Requires a Rust toolchain.
+
+```sh
+git clone https://github.com/newbdez33/agent-ledger && cd agent-ledger
+make install          # cargo install + symlink skill/ledger into ~/.claude/skills/ledger
+ledger --help
+```
+
+Every command takes `--json`. The database lives at `--db PATH`, else `$LEDGER_DB`, else `~/.agent-ledger/ledger.db`. Set `LEDGER_ACTOR` so the audit trail says who wrote each row.
+
+## What it looks like
 
 ```sh
 ledger account add poly-usdc --currency USDC --decimals 6
