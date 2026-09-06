@@ -95,6 +95,12 @@ pub struct Account {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct AccountAddResult {
+    pub account: Account,
+    pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct Entry {
     pub id: i64,
     pub account: String,

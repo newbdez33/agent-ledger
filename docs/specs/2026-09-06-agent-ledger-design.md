@@ -135,6 +135,11 @@ Append-only is enforced by the database itself, so it holds even when someone op
 
 Entries without `--ref` are never deduplicated.
 
+**Idempotent `account add`.** When an account of that name already exists (case-insensitive):
+
+- same `currency` and `decimals` → return the existing account with `"duplicate": true`, exit 0. `--note` is ignored; the stored row is not changed.
+- different `currency` or `decimals` → `account_exists`, exit 2.
+
 **Group.** `--group <id>` on `add`, `transfer`, and `import` is a caller-chosen, non-empty string that links the legs of one position across accounts, e.g. `arb:btc-5m:2026-09-06T03:10Z`. `transfer` without `--group` generates a UUID v4 so its two legs are always linked. A reversal inherits the group of the entry it reverses, so a fully reversed group nets to zero. `group <id>` shows every entry in the group across all accounts with a per-currency net; there is no FX, so nets are never summed across currencies.
 
 **Meta.** `--meta <json>` must be a JSON object; anything else is `invalid_meta`. It is stored verbatim and returned parsed in JSON output. The skill fixes the conventional keys for trading: `market`, `side`, `price`, `shares`, `strategy`, `venue`.
@@ -218,7 +223,7 @@ The entry object, used everywhere an entry appears:
 | `show` | `{entry, balance}` |
 | `transfer` | `{entries: [from_leg, to_leg], duplicate}` |
 | `reverse` | `{entries: [reversal, …]}` |
-| `account add` | `{account: {id, name, currency, decimals, note, created_at}}` |
+| `account add` | `{account: {id, name, currency, decimals, note, created_at}, duplicate}` |
 | `account list` | `{accounts: [account, …]}` |
 | `balance` | `{accounts: [{account, currency, balance, entries, last_ts, last_reconciled_at}, …]}` |
 | `balance <a>` | `{account, currency, balance, at}` |
@@ -265,7 +270,7 @@ The skill is authored with the `writing-skills` skill during implementation so i
 Library tests run against a temporary database file:
 
 - sums: balance equals the signed sum of entries; `--at` respects `ts`.
-- idempotency: same ref, same kind and amount returns duplicate; different amount returns `ref_conflict` and writes nothing.
+- idempotency: same ref, same kind and amount returns duplicate; different amount returns `ref_conflict` and writes nothing. `account add` with the same name, currency and decimals returns duplicate; a different currency or decimals is `account_exists`.
 - reversal: negates, links, inherits group; second reversal rejected; reversing a reversal rejected; reversing one transfer leg reverses the sibling; `--group` reverses only unreversed non-reversal entries and errors when nothing is left.
 - append-only: `UPDATE` and `DELETE` on `entries` and `snapshots` fail with the trigger message.
 - transfer: atomic two-leg write; currency mismatch rejected; nothing written on failure; generated group id when none given.

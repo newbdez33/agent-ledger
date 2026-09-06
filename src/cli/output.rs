@@ -6,9 +6,7 @@ use agent_ledger::model::*;
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum Output {
-    Account {
-        account: Account,
-    },
+    Account(AccountAddResult),
     Accounts {
         accounts: Vec<Account>,
     },

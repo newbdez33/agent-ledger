@@ -68,9 +68,7 @@ fn run(cli: Cli) -> Result<Output, LedgerError> {
                     decimals,
                     note,
                 },
-        } => Output::Account {
-            account: ledger.add_account(&name, &currency, decimals, note.as_deref())?,
-        },
+        } => Output::Account(ledger.add_account(&name, &currency, decimals, note.as_deref())?),
         Command::Account {
             command: AccountCommand::List,
         } => Output::Accounts {

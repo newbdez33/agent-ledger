@@ -19,7 +19,7 @@ Every command takes `--json` and `--help`; the file is `--db PATH`, else `$LEDGE
 
 ## Recipe
 
-1. **One account per real venue balance**, decimals explicit. Retry-safe: `account_exists` (exit 2) means it is already there.
+1. **One account per real venue balance**, decimals explicit. Re-running with the same currency and decimals returns `"duplicate": true`, exit 0. A different currency or decimals is `account_exists`, exit 2.
    `ledger account add poly-usdc --currency USDC --decimals 6 --json`
 2. **Record each movement** with `--json`, a `--ref`, and for positions the same `--group` on every leg plus `--meta`. Every position gets a group, even a one-venue buy and redeem; name it `<strategy>:<market>`.
    `ledger add poly-usdc -25.5 --kind trade --ref ord-7f3 --group arb:btc-0310 --meta '{"strategy":"arb","market":"btc-5m-0310","side":"buy","price":"0.51","shares":"50","venue":"polymarket"}' --ts 2026-09-06T03:10:02Z --json`
@@ -76,7 +76,7 @@ Negative balances are allowed; the ledger does not know your funding.
 ## Reading results
 
 Exit 0 success (including duplicates), 1 usage or IO, 2 domain error. Errors go to stderr as `{"error":{"code","message"}}` (`line` added for `import`). JSON amounts are strings.
-Shapes: `add` → `{entry, balance, duplicate}` where `balance` is the account's current balance (on a duplicate too); `balance` → `{accounts:[{account, currency, balance, entries, last_ts, last_reconciled_at}]}` and `balance <account> [--at]` → `{account, currency, balance, at}`; `history` → `{entries:[... balance_after]}`; `group` → `{entries, net}`; `pnl` → `{accounts:[{rows:[{bucket, trades, settlements, fees, adjustments, other, net}]}]}`; `reconcile` → `{snapshot, adjustment|null}`; `snapshots` → oldest first, last row is the latest.
+Shapes: `add` → `{entry, balance, duplicate}` where `balance` is the account's current balance (on a duplicate too); `account add` → `{account, duplicate}`; `balance` → `{accounts:[{account, currency, balance, entries, last_ts, last_reconciled_at}]}` and `balance <account> [--at]` → `{account, currency, balance, at}`; `history` → `{entries:[... balance_after]}`; `group` → `{entries, net}`; `pnl` → `{accounts:[{rows:[{bucket, trades, settlements, fees, adjustments, other, net}]}]}`; `reconcile` → `{snapshot, adjustment|null}`; `snapshots` → oldest first, last row is the latest.
 After a replay, compare `entries` counts from `balance` before and after: unchanged means nothing double-counted.
 
 ## Common mistakes
@@ -84,7 +84,7 @@ After a replay, compare `entries` counts from `balance` before and after: unchan
 - Recording a zero-amount "settlement" for a leg that expired worthless → `zero_amount`. Record nothing.
 - Reusing the fill's order id as the fee's `--ref` → `ref_conflict`. Use `fee:<order-id>`.
 - Leaving `--decimals` at its default of 2 for a stablecoin account, then failing on `0.8925`. Pass `--decimals 6`.
-- Treating `account_exists` on a retry as a failure. It is the account being there.
+- Re-running `account add` with a different currency or decimals. Same name, currency and decimals is a duplicate success; a mismatch is `account_exists`.
 - Retrying a successful `reconcile`. Each run adds a snapshot row; the second one changes nothing.
 - Passing a stale `--ts` for a balance you fetched just now. The book as of that time excludes later entries and the adjustment lands in the past. For a live balance omit `--ts`; for a real historical statement use its time with `--no-adjust`.
 - Summing `net` across currencies inside the tool. It never does; you do, explicitly.
