@@ -51,3 +51,7 @@ docs/plans/     implementation plans
 This project is spec-driven: a design document in `docs/specs/` is written and reviewed before code, then an implementation plan in `docs/plans/` breaks it into test-first steps.
 
 Rust, stable toolchain. Runtime dependencies are `rusqlite` (bundled SQLite), `clap`, `rust_decimal`, `chrono`, `serde`, `uuid`.
+
+## License
+
+[MIT](LICENSE)
