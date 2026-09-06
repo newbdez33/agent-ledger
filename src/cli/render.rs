@@ -6,10 +6,17 @@ use super::output::Output;
 
 pub fn render(out: &Output) -> String {
     match out {
-        Output::Account { account } => format!(
-            "account {} ({}, {} decimals) id={}\n",
-            account.name, account.currency, account.decimals, account.id
-        ),
+        Output::Account(r) => {
+            let mut s = format!(
+                "account {} ({}, {} decimals) id={}",
+                r.account.name, r.account.currency, r.account.decimals, r.account.id
+            );
+            if r.duplicate {
+                s.push_str("  (duplicate: account already existed)");
+            }
+            s.push('\n');
+            s
+        }
         Output::Accounts { accounts } => table(
             &["id", "name", "currency", "decimals", "note"],
             &accounts

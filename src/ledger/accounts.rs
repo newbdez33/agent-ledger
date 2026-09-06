@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, Row};
 
 use super::{account_by_name, Ledger};
 use crate::error::{LedgerError, Result};
-use crate::model::Account;
+use crate::model::{Account, AccountAddResult};
 use crate::time;
 
 fn account_from_row(r: &Row<'_>) -> rusqlite::Result<Account> {
@@ -33,7 +33,7 @@ impl Ledger {
         currency: &str,
         decimals: u32,
         note: Option<&str>,
-    ) -> Result<Account> {
+    ) -> Result<AccountAddResult> {
         let name = name.trim();
         if name.is_empty() {
             return Err(LedgerError::InvalidAccountName);
@@ -43,7 +43,14 @@ impl Ledger {
             return Err(LedgerError::InvalidCurrency);
         }
         let tx = self.write_tx()?;
-        if account_by_name(&tx, name).is_ok() {
+        if let Ok(existing) = account_by_name(&tx, name) {
+            if existing.currency == currency && existing.decimals == decimals {
+                let account = load_account(&tx, existing.id)?;
+                return Ok(AccountAddResult {
+                    account,
+                    duplicate: true,
+                });
+            }
             return Err(LedgerError::AccountExists(name.to_string()));
         }
         tx.execute(
@@ -53,7 +60,10 @@ impl Ledger {
         let id = tx.last_insert_rowid();
         let account = load_account(&tx, id)?;
         tx.commit()?;
-        Ok(account)
+        Ok(AccountAddResult {
+            account,
+            duplicate: false,
+        })
     }
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
@@ -74,7 +84,8 @@ mod tests {
         let mut l = Ledger::open_in_memory().unwrap();
         let a = l
             .add_account(" poly-usdc ", "usdc", 6, Some("polymarket proxy wallet"))
-            .unwrap();
+            .unwrap()
+            .account;
         assert_eq!(a.name, "poly-usdc");
         assert_eq!(a.currency, "USDC");
         assert_eq!(a.decimals, 6);
@@ -90,11 +101,27 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_name_is_case_insensitive() {
+    fn identical_readd_is_duplicate_including_case_insensitive_name() {
         let mut l = Ledger::open_in_memory().unwrap();
-        l.add_account("Wallet", "USD", 2, None).unwrap();
+        let first = l.add_account("Wallet", "USD", 2, Some("kept")).unwrap();
+        assert!(!first.duplicate);
+        let again = l.add_account("wallet", "usd", 2, Some("ignored")).unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.account.id, first.account.id);
+        assert_eq!(again.account.name, "Wallet");
+        assert_eq!(again.account.note.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn different_currency_or_decimals_is_still_exists() {
+        let mut l = Ledger::open_in_memory().unwrap();
+        l.add_account("poly-usdc", "USDC", 6, None).unwrap();
         assert!(matches!(
-            l.add_account("wallet", "USD", 2, None),
+            l.add_account("poly-usdc", "USD", 6, None),
+            Err(LedgerError::AccountExists(_))
+        ));
+        assert!(matches!(
+            l.add_account("poly-usdc", "USDC", 2, None),
             Err(LedgerError::AccountExists(_))
         ));
     }

@@ -116,6 +116,54 @@ fn add_balance_history_json_shapes() {
 }
 
 #[test]
+fn account_add_identical_rerun_is_duplicate_mismatch_is_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l.db");
+    let add = [
+        "--json",
+        "account",
+        "add",
+        "poly-usdc",
+        "--currency",
+        "USDC",
+        "--decimals",
+        "6",
+    ];
+    let first = json(&ledger(&db).args(add).output().unwrap().stdout);
+    assert_eq!(first["duplicate"], false);
+    let id = first["account"]["id"].clone();
+
+    let out = ledger(&db).args(add).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let again = json(&out.stdout);
+    assert_eq!(again["duplicate"], true);
+    assert_eq!(again["account"]["id"], id);
+    assert_eq!(again["account"]["currency"], "USDC");
+    assert_eq!(again["account"]["decimals"], 6);
+
+    let mismatch = ledger(&db)
+        .args([
+            "--json",
+            "account",
+            "add",
+            "poly-usdc",
+            "--currency",
+            "USD",
+            "--decimals",
+            "6",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(mismatch.status.code(), Some(2));
+    assert!(mismatch.stdout.is_empty());
+    assert_eq!(json(&mismatch.stderr)["error"]["code"], "account_exists");
+}
+
+#[test]
 fn duplicate_ref_exits_0_and_conflict_exits_2_with_json_error() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("l.db");
