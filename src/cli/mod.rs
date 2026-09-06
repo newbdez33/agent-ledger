@@ -38,7 +38,7 @@ pub enum Command {
     Add(AddArgs),
     /// Move money between two same-currency accounts
     Transfer(TransferArgs),
-    /// Reverse an entry, or every open entry in a group
+    /// Reverse an entry, or every not-yet-reversed entry in a group
     Reverse(ReverseArgs),
     /// Show balances
     Balance(BalanceArgs),
@@ -64,11 +64,15 @@ pub enum Command {
 pub enum AccountCommand {
     /// Create an account
     Add {
+        /// Unique, case-insensitive name, e.g. poly-usdc
         name: String,
+        /// Currency code, stored uppercase (USDC, USD, BTC)
         #[arg(long)]
         currency: String,
+        /// Fraction digits the account allows (USDC 6, USD 2, BTC 8); never rounds
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(0..=18))]
         decimals: u32,
+        /// Free-text note
         #[arg(long)]
         note: Option<String>,
     },
@@ -82,7 +86,8 @@ pub struct AddArgs {
     /// Signed decimal; positive is an inflow
     #[arg(allow_negative_numbers = true)]
     pub amount: String,
-    /// deposit | withdrawal | trade | settlement | fee | adjustment | other
+    /// deposit (+) | withdrawal (-) | trade (buy -, sell +) | settlement (redeem, resolution,
+    /// expiry or funding cash) | fee (-) | adjustment | other
     #[arg(long)]
     pub kind: String,
     /// External id (order id, tx hash); unique per account, makes the call idempotent
@@ -103,18 +108,25 @@ pub struct AddArgs {
 
 #[derive(Args, Debug)]
 pub struct TransferArgs {
+    /// Account money leaves
     pub from: String,
+    /// Account money enters (same currency)
     pub to: String,
+    /// Positive decimal
     #[arg(allow_negative_numbers = true)]
     pub amount: String,
+    /// External id; unique per account, makes the call idempotent
     #[arg(long = "ref")]
     pub reference: Option<String>,
     #[arg(long)]
     pub memo: Option<String>,
+    /// When it happened (RFC 3339 or YYYY-MM-DD); default now
     #[arg(long)]
     pub ts: Option<String>,
+    /// Group id for both legs; default a fresh UUID
     #[arg(long)]
     pub group: Option<String>,
+    /// JSON object with structured attributes
     #[arg(long)]
     pub meta: Option<String>,
 }
@@ -123,7 +135,7 @@ pub struct TransferArgs {
 pub struct ReverseArgs {
     #[arg(required_unless_present = "group", conflicts_with = "group")]
     pub entry_id: Option<i64>,
-    /// Reverse every open entry in this group
+    /// Reverse every entry in this group that has not been reversed yet
     #[arg(long)]
     pub group: Option<String>,
     #[arg(long)]
@@ -144,12 +156,16 @@ pub struct HistoryArgs {
     /// Most recent N entries; 0 for all
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
+    /// Inclusive lower bound on entry ts (RFC 3339 or YYYY-MM-DD)
     #[arg(long)]
     pub since: Option<String>,
+    /// Inclusive upper bound on entry ts
     #[arg(long)]
     pub until: Option<String>,
+    /// Only this kind (any of the nine, including transfer and reversal)
     #[arg(long)]
     pub kind: Option<String>,
+    /// Only entries in this group
     #[arg(long)]
     pub group: Option<String>,
 }
@@ -172,11 +188,14 @@ pub struct ReconcileArgs {
     /// Balance you actually observed at the venue or on chain
     #[arg(long, allow_negative_numbers = true)]
     pub observed: String,
+    /// Where the observation came from (polygon-rpc, kalshi-api, ...)
     #[arg(long)]
     pub source: Option<String>,
     /// Record the snapshot but do not post an adjustment entry
     #[arg(long)]
     pub no_adjust: bool,
+    /// When the balance was observed; the book is compared as of this time.
+    /// Default: now, or the latest booked entry if that is later
     #[arg(long)]
     pub ts: Option<String>,
 }

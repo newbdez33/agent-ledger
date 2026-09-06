@@ -9,6 +9,7 @@ use super::{
 use crate::error::Result;
 use crate::model::{Kind, ReconcileResult, Snapshot, SnapshotList};
 use crate::money::format_amount;
+use crate::time;
 
 #[derive(Clone, Debug)]
 pub struct ReconcileRequest {
@@ -43,7 +44,23 @@ impl Ledger {
         let tx = self.write_tx()?;
         let acc = account_by_name(&tx, &req.account)?;
         let observed = parse_account_amount(&req.observed, &acc)?;
-        let ts = resolve_ts(req.ts.as_deref())?;
+        let ts = match req.ts.as_deref() {
+            Some(t) => resolve_ts(Some(t))?,
+            // An implicit reconcile must see the whole book, even entries stamped with a venue
+            // time later than this machine's clock. Explicit --ts is the only way to go historical.
+            None => {
+                let now = time::now();
+                let latest: Option<String> = tx.query_row(
+                    "SELECT MAX(ts) FROM entries WHERE account_id = ?1",
+                    params![acc.id],
+                    |r| r.get(0),
+                )?;
+                match latest {
+                    Some(l) if l > now => l,
+                    _ => now,
+                }
+            }
+        };
         let book = balance_minor(&tx, acc.id, Some(&ts))?;
         let diff = observed - book;
 
@@ -201,6 +218,21 @@ mod tests {
         assert_eq!(r.snapshot.ts, "2026-09-02T00:00:00.000Z");
         assert_eq!(l.balance("w", Some("2026-09-02")).unwrap().balance, "9.00");
         assert_eq!(l.balance("w", None).unwrap().balance, "6.00");
+    }
+
+    #[test]
+    fn default_ts_never_predates_booked_entries() {
+        let mut l = ledger_with(&[("w", "USD", 2)]);
+        l.add(&AddRequest {
+            ts: Some("2999-01-01T00:00:00Z".into()),
+            ..req("w", "10", Kind::Deposit)
+        })
+        .unwrap();
+        let r = l.reconcile(&rreq("10")).unwrap();
+        assert_eq!(r.snapshot.book, "10.00");
+        assert_eq!(r.snapshot.diff, "0.00");
+        assert_eq!(r.snapshot.ts, "2999-01-01T00:00:00.000Z");
+        assert!(r.adjustment.is_none());
     }
 
     #[test]
