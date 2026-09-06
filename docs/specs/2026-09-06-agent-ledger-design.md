@@ -1,8 +1,8 @@
 # agent-ledger — Design
 
-**Goal:** An append-only, SQLite-backed ledger that AI agents drive from the shell. It records balance movements (deposits, withdrawals, trades, fees, PnL) across multiple accounts and currencies, reconciles book balances against observed balances, and keeps a complete audit trail that no caller can rewrite.
+**Goal:** An append-only, SQLite-backed ledger that AI agents drive from the shell. It records balance movements (deposits, withdrawals, trades, fees, settlements) across multiple accounts and currencies, links the legs of a position so realized PnL is one query, reconciles book balances against observed balances, and keeps a complete audit trail that no caller can rewrite.
 
-**Non-goal:** Double-entry bookkeeping with a chart of accounts, multi-user authentication, a network service or HTTP API, valuation of non-cash positions, automatic ingestion from exchanges or chains (the caller fetches and posts), and any reporting beyond balance, history, and export.
+**Non-goal:** Double-entry bookkeeping with a chart of accounts, multi-user authentication, a network service or HTTP API, mark-to-market valuation of open positions, FX conversion between currencies, automatic ingestion from exchanges or chains (the caller fetches and posts), and reporting beyond balance, history, realized PnL, and export.
 
 ## Context
 
@@ -14,13 +14,22 @@ Existing options do not fit:
 - Agent wallet toolkits (Coinbase AgentKit, Ledger Agent Stack, Skyfire) move money and enforce spend limits; they do not keep books.
 - Plain-text accounting (hledger, beancount) is agent-readable, but it is double-entry and has no structured write path or idempotency for a retrying agent.
 
-The immediate consumer is a Polymarket trading bot whose only wallet record today is a Redis snapshot of `{usdc, fetched_at}` plus strategy-level PnL. Deposits, withdrawals, redeems, and fees are not recorded anywhere.
+The immediate consumers are a Polymarket short-window trading bot, whose only wallet record today is a Redis snapshot of `{usdc, fetched_at}` plus strategy-level PnL, and a Polymarket↔Kalshi arbitrage monitor. Deposits, withdrawals, redeems, and fees are not recorded anywhere.
+
+### What quant and arbitrage use demands
+
+- **A position is several cash movements over time.** A buy fill, maybe a fee, a settlement. An arbitrage position spans two venues, two accounts, and two currencies (USDC on Polymarket, USD on Kalshi). The ledger must link these legs so the realized result of one position is one query. Hence a caller-supplied `group`.
+- **Entries need structured attributes.** Market, side, price, shares, strategy. An analyst must be able to filter on them later without parsing memos. Hence a `meta` JSON column.
+- **Realized PnL is the primary question.** Over a period, per strategy, per position. Capital movements (deposits, withdrawals, transfers) must be excluded from it automatically. Hence a `pnl` report.
+- **History has to be backfilled** from on-chain and exchange data, atomically and idempotently. Hence `import`.
+- **Losing positions settle to zero cash** and therefore produce no entry. The group's net is the loss; nothing extra is recorded.
+- **The ledger tracks cash only.** Open-position value comes from the venue. Equity is ledger balance plus venue-reported position value, computed by the caller.
 
 ## Users and interface
 
 - **AI agents** (Claude Code and similar) shell out to the `ledger` binary with `--json` and parse the result. A companion skill teaches them when and how.
 - **Automated processes** (e.g. a trader daemon) call the same binary to record fills.
-- **Humans** read `ledger balance` and `ledger history` as aligned text tables.
+- **Humans** read `ledger balance`, `ledger history`, and `ledger pnl` as aligned text tables.
 
 ## Architecture
 
@@ -28,8 +37,9 @@ One Rust crate, `agent-ledger`, producing one binary, `ledger`.
 
 ```
 src/lib.rs        Ledger core over rusqlite: open/migrate, accounts, entries,
-                  transfers, reversals, balances, history, reconcile, export.
-                  No CLI concerns; every operation is one SQLite transaction.
+                  transfers, reversals, balances, history, groups, pnl,
+                  reconcile, snapshots, import, export. No CLI concerns;
+                  every operation is one SQLite transaction.
 src/main.rs       clap CLI: parse args, call the core, render a table or JSON,
                   map errors to exit codes.
 skill/ledger/     SKILL.md companion skill for agents.
@@ -49,7 +59,8 @@ Dependencies: `rusqlite` (bundled SQLite), `clap` (derive), `rust_decimal`, `chr
 ### Money and time
 
 - Amounts are stored as `INTEGER` minor units. Each account declares `decimals` (USDC 6, USD 2, BTC 8). Input is parsed with `rust_decimal`; an input with more fractional digits than the account allows is rejected, never rounded. Sums in SQL are exact integer sums. Output renders as a decimal string with exactly `decimals` fraction digits, and JSON carries amounts as strings, never numbers.
-- Sign convention: positive is an inflow to the account, negative is an outflow. Zero is rejected.
+- Sign convention: positive is an inflow to the account, negative is an outflow. Zero is rejected. Negative balances are allowed; nothing enforces a floor, because margin venues legitimately go negative.
+- Currency codes are stored uppercase. Account names are unique case-insensitively and looked up case-insensitively.
 - Timestamps are `TEXT` in RFC 3339 UTC with millisecond precision, e.g. `2026-09-06T03:12:45.000Z`. Fixed width keeps lexical order equal to chronological order. `ts` is when the movement happened (caller-supplied or now); `recorded_at` is when the row was written (always now). A caller-supplied `--ts` may carry any offset; it is normalized to UTC milliseconds before storage.
 
 ### Schema
@@ -75,18 +86,20 @@ CREATE TABLE entries (
   ts           TEXT NOT NULL,
   recorded_at  TEXT NOT NULL,
   kind         TEXT NOT NULL CHECK (kind IN
-                 ('deposit','withdrawal','trade','fee','pnl',
+                 ('deposit','withdrawal','trade','settlement','fee',
                   'transfer','adjustment','reversal','other')),
   amount       INTEGER NOT NULL CHECK (amount <> 0),
   ref          TEXT,
   memo         TEXT,
   actor        TEXT,
-  reverses_id  INTEGER REFERENCES entries(id),
-  group_id     TEXT
+  group_id     TEXT,
+  meta         TEXT CHECK (meta IS NULL OR json_type(meta) = 'object'),
+  reverses_id  INTEGER REFERENCES entries(id)
 );
 CREATE UNIQUE INDEX entries_account_ref ON entries(account_id, ref)   WHERE ref IS NOT NULL;
 CREATE UNIQUE INDEX entries_reverses    ON entries(reverses_id)       WHERE reverses_id IS NOT NULL;
 CREATE INDEX        entries_account_ts  ON entries(account_id, ts, id);
+CREATE INDEX        entries_group       ON entries(group_id)          WHERE group_id IS NOT NULL;
 
 CREATE TRIGGER entries_no_update BEFORE UPDATE ON entries
   BEGIN SELECT RAISE(ABORT, 'ledger entries are append-only'); END;
@@ -109,11 +122,11 @@ CREATE TRIGGER snapshots_no_delete BEFORE DELETE ON snapshots
   BEGIN SELECT RAISE(ABORT, 'ledger snapshots are append-only'); END;
 ```
 
-Append-only is enforced by the database itself, so it holds even when someone opens the file with `sqlite3` directly. Accounts have no delete or edit command; the foreign keys make deleting an account with entries impossible anyway.
+Append-only is enforced by the database itself, so it holds even when someone opens the file with `sqlite3` directly. Accounts have no delete or edit command; the foreign keys make deleting an account with entries impossible anyway. `meta` is validated as a JSON object by the CHECK constraint, so `json_extract(meta, '$.strategy')` always works in ad-hoc queries.
 
 ### Rules
 
-**Kinds and signs.** `deposit` must be positive. `withdrawal` and `fee` must be negative. `trade`, `pnl`, `adjustment`, `other` may carry either sign. `transfer` and `reversal` are written only by their own commands, never by `add`.
+**Kinds and signs.** `deposit` must be positive. `withdrawal` and `fee` must be negative. `trade` (fills: buy negative, sell positive), `settlement` (cash posted when a position resolves, expires, is redeemed, or receives funding), `adjustment`, and `other` (rebates, airdrops, anything else) may carry either sign. `transfer` and `reversal` are written only by their own commands, never by `add` or `import`.
 
 **Idempotent `add` with `--ref`.** When `--ref` is given and `(account, ref)` already exists:
 
@@ -122,17 +135,33 @@ Append-only is enforced by the database itself, so it holds even when someone op
 
 Entries without `--ref` are never deduplicated.
 
-**Transfer.** `transfer <from> <to> <amount>` requires a positive amount and two accounts with the same `currency`. It writes two `transfer` entries in one transaction: `-amount` on `from`, `+amount` on `to`, sharing a fresh `group_id` (UUID v4). With `--ref`, both legs carry the ref. On replay, if both legs already exist with matching amounts the call returns them with `"duplicate": true`; if only one leg exists, or an amount differs, it is `ref_conflict` and nothing is written.
+**Group.** `--group <id>` on `add`, `transfer`, and `import` is a caller-chosen, non-empty string that links the legs of one position across accounts, e.g. `arb:btc-5m:2026-09-06T03:10Z`. `transfer` without `--group` generates a UUID v4 so its two legs are always linked. A reversal inherits the group of the entry it reverses, so a fully reversed group nets to zero. `group <id>` shows every entry in the group across all accounts with a per-currency net; there is no FX, so nets are never summed across currencies.
 
-**Reversal.** `reverse <entry-id>` writes a `reversal` entry on the same account with `amount = -original.amount` and `reverses_id = original.id`, `ts = now`. If the original has a `group_id`, every entry in that group is reversed in one transaction and the reversals share a new `group_id`. Rejected when the target is itself a `reversal` (`cannot_reverse_reversal`) or already has a reversal (`already_reversed`, guaranteed by the unique index). To undo a reversal, add the entry again.
+**Meta.** `--meta <json>` must be a JSON object; anything else is `invalid_meta`. It is stored verbatim and returned parsed in JSON output. The skill fixes the conventional keys for trading: `market`, `side`, `price`, `shares`, `strategy`, `venue`.
 
-**Reconcile.** `reconcile <account> --observed <amount>` runs in one transaction: `book = SUM(amount)` over the account, `diff = observed - book`, insert a snapshot. If `diff != 0` and `--no-adjust` is absent, insert an `adjustment` entry with `amount = diff`, the same `ts` as the snapshot, memo `reconcile: observed <o>, book <b>`, and set `snapshot.adjustment_entry_id`. The book balance therefore equals the observed balance after every reconcile unless the caller opts out.
+**Transfer.** `transfer <from> <to> <amount>` requires a positive amount and two accounts with the same `currency`. It writes two `transfer` entries in one transaction: `-amount` on `from`, `+amount` on `to`, sharing a `group_id`. With `--ref`, both legs carry the ref. On replay, if both legs already exist with matching amounts the call returns them with `"duplicate": true`; if only one leg exists, or an amount differs, it is `ref_conflict` and nothing is written. Moving value between currencies (USDC on Polygon to USD at Kalshi) is not a transfer; it is a `withdrawal` on one account and a `deposit` on the other, optionally sharing a `--group`.
+
+**Reversal.** `reverse <entry-id>` writes a `reversal` entry on the same account with `amount = -original.amount`, `reverses_id = original.id`, `group_id = original.group_id`, `ts = now`. If the original is a `transfer` leg, its sibling leg is reversed in the same transaction, because a transfer is one movement. `reverse --group <id>` reverses every entry in the group that is neither a reversal nor already reversed, in one transaction; `nothing_to_reverse` if there are none. Rejected when a target is itself a `reversal` (`cannot_reverse_reversal`) or already has a reversal (`already_reversed`, guaranteed by the unique index). To undo a reversal, add the entry again.
+
+**Reconcile.** `reconcile <account> --observed <amount> [--ts <t>]` runs in one transaction with `t` defaulting to now: `book = SUM(amount) WHERE ts <= t`, `diff = observed - book`, insert a snapshot at `t`. If `diff != 0` and `--no-adjust` is absent, insert an `adjustment` entry with `amount = diff`, `ts = t`, memo `reconcile: observed <o>, book <b>`, and set `snapshot.adjustment_entry_id`. The book balance as of `t` therefore equals the observed balance after every reconcile unless the caller opts out. `snapshots <account>` lists past snapshots.
 
 **Balance.** `balance` lists every account with its current balance. `balance <account> [--at <ts>]` sums entries with `ts <= at`. Both use `ts`, not `recorded_at`.
 
-**History.** Entries of one account ordered by `(ts, id)` with a running balance computed by a window function (`SUM(amount) OVER (ORDER BY ts, id)`), never stored. `--since`/`--until` filter on `ts`, `--kind` filters on kind, `--limit N` (default 50) keeps the most recent N of the filtered set and prints them oldest first. The running balance is computed over the whole account before filtering, so it is always the true balance after that entry.
+**History.** Entries of one account ordered by `(ts, id)` with a running balance computed by a window function (`SUM(amount) OVER (ORDER BY ts, id)`), never stored. `--since`/`--until` filter on `ts`, `--kind` filters on kind, `--group` filters on group, `--limit N` (default 50, `0` for unlimited) keeps the most recent N of the filtered set and prints them oldest first. The running balance is computed over the whole account before filtering, so it is always the true balance after that entry.
 
-**Actor.** `--actor <name>` overrides the `LEDGER_ACTOR` environment variable; when neither is set, `actor` is null. It records who wrote the row (`claude`, `poly-trader`), not who owns the money.
+**PnL.** `pnl [<account>] [--since] [--until] [--by day|week|month|group|meta:<key>]` reports realized cash PnL. Capital movements are excluded: `deposit`, `withdrawal`, `transfer`, and reversals of those. Every other entry counts, and a `reversal` counts under the kind of the entry it reverses. Columns: `trades`, `settlements`, `fees`, `adjustments`, `other`, `net`. Without `--by` there is one row per account; with `--by`, one row per bucket, where `day`/`week`/`month` bucket on `ts` (`%Y-%m-%d`, `%Y-W%W`, `%Y-%m`), `group` buckets on `group_id`, and `meta:<key>` buckets on `json_extract(meta, '$.<key>')`. Entries without the bucket value fall in a `null` bucket. Without `<account>` every account is reported, each in its own currency.
+
+**Import.** `import [--dry-run]` reads JSON Lines from stdin, one entry per line:
+
+```json
+{"account":"poly-usdc","amount":"-25.500000","kind":"trade","ref":"order-7f3",
+ "ts":"2026-09-06T03:10:02Z","group":"arb:btc-5m:03:10","memo":"BTC 5m up",
+ "meta":{"market":"btc-5m-0310","side":"buy","price":"0.51","shares":"50"}}
+```
+
+`account`, `amount`, `kind` are required; `amount` must be a JSON string (JSON numbers are floats and are rejected as `invalid_amount`). `ref`, `ts`, `group`, `memo`, `meta`, `actor` are optional and mean what the `add` flags mean. Every line is validated, then all lines are applied in one transaction with the same rules as `add`, including ref idempotency. A duplicate is skipped and counted; any error rolls back the whole batch and reports the line number. `--dry-run` runs the transaction and rolls it back, reporting what would have happened. Only `add` kinds are importable; transfers are not.
+
+**Actor.** `--actor <name>` overrides the `LEDGER_ACTOR` environment variable; when neither is set, `actor` is null. It records who wrote the row (`claude`, `poly-trader`, `backfill`), not who owns the money.
 
 ### CLI
 
@@ -141,13 +170,19 @@ ledger [--db <path>] [--json] [--actor <name>] <command>
 
   account add <name> --currency <code> [--decimals <n>] [--note <text>]
   account list
-  add <account> <amount> --kind <deposit|withdrawal|trade|fee|pnl|adjustment|other>
-      [--ref <id>] [--memo <text>] [--ts <rfc3339>]
+  add <account> <amount> --kind <deposit|withdrawal|trade|settlement|fee|adjustment|other>
+      [--ref <id>] [--memo <text>] [--ts <rfc3339>] [--group <id>] [--meta <json>]
   transfer <from> <to> <amount> [--ref <id>] [--memo <text>] [--ts <rfc3339>]
-  reverse <entry-id> [--memo <text>]
+      [--group <id>] [--meta <json>]
+  reverse (<entry-id> | --group <id>) [--memo <text>]
   balance [<account>] [--at <rfc3339>]
-  history <account> [--limit <n>] [--since <rfc3339>] [--until <rfc3339>] [--kind <kind>]
+  history <account> [--limit <n>] [--since <rfc3339>] [--until <rfc3339>]
+      [--kind <kind>] [--group <id>]
+  group <id>
+  pnl [<account>] [--since <rfc3339>] [--until <rfc3339>] [--by day|week|month|group|meta:<key>]
   reconcile <account> --observed <amount> [--source <text>] [--no-adjust] [--ts <rfc3339>]
+  snapshots <account> [--limit <n>]
+  import [--dry-run]
   show <entry-id>
   export <account> --format <csv|json>
 ```
@@ -155,61 +190,44 @@ ledger [--db <path>] [--json] [--actor <name>] <command>
 - `<amount>` is a decimal with an optional leading `-`. An unsigned amount is positive. The positional accepts negative numbers (`clap` `allow_negative_numbers`).
 - `--decimals` defaults to 2. Agents creating a stablecoin account pass `--decimals 6` explicitly; the skill says so.
 - `account list` shows accounts (id, name, currency, decimals, note); `balance` shows money. They do not overlap.
-- `export` writes every entry of the account with running balance to stdout; CSV columns are `id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,reverses_id,group_id`.
+- `export` writes every entry of the account with running balance to stdout; CSV columns are `id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,group_id,meta,reverses_id,reversed_by`, with `meta` as the raw JSON string.
 
 ### Output
 
-Default output is an aligned text table for humans. With `--json`, stdout carries exactly one JSON object per command. Amounts are decimal strings; timestamps are RFC 3339 strings; absent values are `null`.
+Default output is an aligned text table for humans. With `--json`, stdout carries exactly one JSON object per command. Amounts are decimal strings; timestamps are RFC 3339 strings; absent values are `null`; `meta` is a parsed object or `null`.
 
-`add` returns `{entry, balance, duplicate}`; `show` returns `{entry, balance}`; `transfer` returns `{entries, duplicate}` with the two legs; `reverse` returns `{entries}` with one entry per reversed leg. `reversed_by` is derived from the reversal index, not stored. The `add` shape:
+The entry object, used everywhere an entry appears:
 
 ```json
 {
-  "entry": {
-    "id": 12, "account": "poly-usdc",
-    "ts": "2026-09-06T03:12:45.000Z", "recorded_at": "2026-09-06T03:12:45.117Z",
-    "kind": "deposit", "amount": "100.000000",
-    "ref": "0xabc…", "memo": null, "actor": "claude",
-    "reverses_id": null, "reversed_by": null, "group_id": null
-  },
-  "balance": "224.700000",
-  "duplicate": false
+  "id": 12, "account": "poly-usdc", "currency": "USDC",
+  "ts": "2026-09-06T03:12:45.000Z", "recorded_at": "2026-09-06T03:12:45.117Z",
+  "kind": "trade", "amount": "-25.500000",
+  "ref": "order-7f3", "memo": "BTC 5m up", "actor": "claude",
+  "group_id": "arb:btc-5m:03:10",
+  "meta": {"market": "btc-5m-0310", "side": "buy", "price": "0.51", "shares": "50"},
+  "reverses_id": null, "reversed_by": null
 }
 ```
 
-`balance` (all accounts):
+`reversed_by` is derived from the reversal index, not stored.
 
-```json
-{ "accounts": [
-  { "account": "poly-usdc", "currency": "USDC", "balance": "124.700000",
-    "entries": 37, "last_ts": "2026-09-06T03:12:45.000Z",
-    "last_reconciled_at": "2026-09-05T22:00:00.000Z" }
-] }
-```
-
-`balance <account>`:
-
-```json
-{ "account": "poly-usdc", "currency": "USDC", "balance": "124.700000", "at": null }
-```
-
-`history` and `export --format json`:
-
-```json
-{ "account": "poly-usdc", "currency": "USDC",
-  "entries": [ { "id": 11, "…": "…", "balance_after": "124.700000" } ] }
-```
-
-`reconcile`:
-
-```json
-{ "snapshot": { "id": 3, "account": "poly-usdc", "ts": "…",
-                "observed": "124.700000", "book": "126.200000",
-                "diff": "-1.500000", "source": "polymarket-onchain" },
-  "adjustment": { "id": 38, "kind": "adjustment", "amount": "-1.500000", "…": "…" } }
-```
-
-`adjustment` is `null` when `--no-adjust` was passed or `diff` was zero.
+| command | shape |
+|---|---|
+| `add` | `{entry, balance, duplicate}` |
+| `show` | `{entry, balance}` |
+| `transfer` | `{entries: [from_leg, to_leg], duplicate}` |
+| `reverse` | `{entries: [reversal, …]}` |
+| `account add` | `{account: {id, name, currency, decimals, note, created_at}}` |
+| `account list` | `{accounts: [account, …]}` |
+| `balance` | `{accounts: [{account, currency, balance, entries, last_ts, last_reconciled_at}, …]}` |
+| `balance <a>` | `{account, currency, balance, at}` |
+| `history`, `export --format json` | `{account, currency, entries: [entry + balance_after, …]}` |
+| `group` | `{group, entries: [entry, …], net: {"USDC": "3.000000", "USD": "-52.00"}}` |
+| `pnl` | `{accounts: [{account, currency, rows: [{bucket, trades, settlements, fees, adjustments, other, net}, …]}, …]}` |
+| `reconcile` | `{snapshot, adjustment}` with `adjustment` an entry or `null` |
+| `snapshots` | `{account, snapshots: [{id, ts, observed, book, diff, adjustment_entry_id, source}, …]}` |
+| `import` | `{imported, duplicates, dry_run, entries: [entry, …]}` |
 
 ### Errors and exit codes
 
@@ -220,22 +238,25 @@ Errors go to stderr. In `--json` mode stderr carries one object and stdout stays
              "message": "amount 1.2345678 has 7 decimals; account poly-usdc allows 6" } }
 ```
 
+Import errors add `"line": <n>` to the object.
+
 | exit | meaning |
 |---|---|
 | 0 | success, including idempotent duplicates |
 | 1 | usage error, I/O error, database error |
 | 2 | domain error, one of the codes below |
 
-Domain error codes: `account_not_found`, `account_exists`, `entry_not_found`, `currency_mismatch`, `precision_exceeded`, `invalid_amount`, `zero_amount`, `invalid_sign`, `invalid_kind`, `invalid_timestamp`, `ref_conflict`, `already_reversed`, `cannot_reverse_reversal`.
+Domain error codes: `account_not_found`, `account_exists`, `entry_not_found`, `group_not_found`, `currency_mismatch`, `precision_exceeded`, `invalid_amount`, `zero_amount`, `invalid_sign`, `invalid_kind`, `invalid_timestamp`, `invalid_group`, `invalid_meta`, `ref_conflict`, `already_reversed`, `cannot_reverse_reversal`, `nothing_to_reverse`.
 
 ### Companion skill
 
 `skill/ledger/SKILL.md` is a Claude Code skill installed by `make install` as a symlink at `~/.claude/skills/ledger`. It contains:
 
-- **When to use:** any time the agent moves money, records a fill, fee or PnL, checks a balance, or has just fetched a live balance from an exchange or chain.
-- **Conventions:** always pass `--json`; always pass `--ref` when an external id exists (order id, tx hash); follow the sign convention; run `reconcile` right after fetching a live balance; never open the SQLite file directly; fix mistakes with `reverse`, never by editing.
+- **When to use:** any time the agent moves money, records a fill, fee or settlement, checks a balance, wants realized PnL, or has just fetched a live balance from an exchange or chain.
+- **Conventions:** always pass `--json`; always pass `--ref` when an external id exists (order id, tx hash) and build a deterministic synthetic ref (`settle:<market>`) when the venue gives none; follow the sign convention; round fees to the account's decimals before posting because the ledger rejects extra precision; one ledger account per real venue balance so reconcile stays meaningful, with strategy attribution in `meta.strategy`; tag every leg of a position with the same `--group`; USDC↔USD moves are withdrawal plus deposit, not transfer; run `reconcile` right after fetching a live balance; never open the SQLite file directly; fix mistakes with `reverse`, never by editing.
+- **Meta keys:** `market`, `side`, `price`, `shares`, `strategy`, `venue`, all as strings.
 - **Cheatsheet:** the command table above.
-- **Worked flow:** a Polymarket wallet from `account add poly-usdc --currency USDC --decimals 6` through a deposit with its tx hash, a `trade` buy, a `pnl` on resolution, a `fee`, and a `reconcile` against the on-chain balance.
+- **Worked flows:** a Polymarket wallet from `account add poly-usdc --currency USDC --decimals 6` through a deposit with its tx hash, a `trade` buy, a `settlement` on resolution, a `fee`, and a `reconcile` against the on-chain balance; and a two-venue arbitrage position with both legs under one `--group`, followed by `group <id>` to read the result.
 
 The skill is authored with the `writing-skills` skill during implementation so its frontmatter and structure are valid.
 
@@ -245,15 +266,19 @@ Library tests run against a temporary database file:
 
 - sums: balance equals the signed sum of entries; `--at` respects `ts`.
 - idempotency: same ref, same kind and amount returns duplicate; different amount returns `ref_conflict` and writes nothing.
-- reversal: negates and links; second reversal rejected; reversing a reversal rejected; reversing one transfer leg reverses the whole group.
+- reversal: negates, links, inherits group; second reversal rejected; reversing a reversal rejected; reversing one transfer leg reverses the sibling; `--group` reverses only unreversed non-reversal entries and errors when nothing is left.
 - append-only: `UPDATE` and `DELETE` on `entries` and `snapshots` fail with the trigger message.
-- transfer: atomic two-leg write; currency mismatch rejected; nothing written on failure.
-- reconcile: snapshot stored, adjustment equals diff, `--no-adjust` writes no entry, zero diff writes no entry.
+- transfer: atomic two-leg write; currency mismatch rejected; nothing written on failure; generated group id when none given.
+- reconcile: snapshot stored, adjustment equals diff, `--no-adjust` writes no entry, zero diff writes no entry, `--ts` computes book as of that time.
 - precision: 7 decimals on a 6-decimal account rejected; 6 accepted exactly.
-- history: running balance correct under `--limit` and `--since` filters.
-- sign rules per kind; zero rejected.
+- history: running balance correct under `--limit`, `--since`, `--group` filters; `--limit 0` unlimited.
+- group: cross-account entries, per-currency nets, fully reversed group nets to zero.
+- pnl: deposits/withdrawals/transfers excluded; reversal folds into original kind; bucketing by day, group, and meta key; null bucket for missing values.
+- import: all-or-nothing on error with line number; duplicates skipped and counted; numeric amount rejected; `--dry-run` writes nothing.
+- meta: non-object rejected; stored and returned verbatim.
+- sign rules per kind; zero rejected; uppercase currency normalization; case-insensitive account lookup.
 
-CLI tests run the built binary with `assert_cmd`: JSON shapes for every command, exit codes 0/1/2, `--db` and `LEDGER_DB` path resolution, default path creation.
+CLI tests run the built binary with `assert_cmd`: JSON shapes for every command, exit codes 0/1/2, `--db` and `LEDGER_DB` path resolution, default path creation, stdin import.
 
 ## Decisions
 
@@ -268,8 +293,21 @@ Recorded from the design conversation on 2026-09-06:
 | reconciliation | snapshot plus automatic adjustment entry, opt-out with `--no-adjust` |
 | idempotency | optional `--ref` unique per account; conflict on mismatched amount |
 | amount storage | integer minor units with per-account decimals |
-| repository | standalone public repo `agent-ledger`, Rust, binary `ledger` |
+| repository | standalone public repo `agent-ledger`, Rust, binary `ledger`, MIT |
 | companion | Claude Code skill shipped in `skill/ledger/`, symlinked by `make install` |
 | docs layout | `docs/specs/` and `docs/plans/` |
+
+Added by the quant/arbitrage review on 2026-09-06:
+
+| gap | decision |
+|---|---|
+| multi-leg positions across venues and currencies | caller-supplied `--group`; `group <id>` view with per-currency nets; reversals inherit group |
+| structured trade attributes | `meta` JSON object column, `--meta`, conventional keys in the skill |
+| realized PnL per period and strategy | `pnl` report excluding capital movements, bucketed by day/week/month/group/meta key |
+| backfilling history | `import` from JSON Lines, one transaction, duplicates skipped, `--dry-run` |
+| `pnl` kind ambiguous in a cash ledger | renamed to `settlement` |
+| snapshots unreadable | `snapshots <account>` command; `reconcile --ts` computes book as of that time |
+| reversing one leg of a caller group reversed everything | `reverse <id>` is single-entry (transfer sibling follows); `reverse --group` is explicit |
+| open-position value, FX | stay out of scope; caller combines ledger cash with venue positions |
 
 Known caveat: the binary name `ledger` collides with ledger-cli if that is installed. Rename the installed binary in that case; the skill refers to the command by name, so update it too.
