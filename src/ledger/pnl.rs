@@ -368,15 +368,13 @@ mod tests {
             .iter()
             .map(|r| (r.bucket.clone(), r.net.clone()))
             .collect();
-        // The -7 trade sits on its own day; its reversal is booked when it happened (now).
-        let today = crate::time::now()[..10].to_string();
+        // The -7 trade and its reversal share the trade's day, so that day nets to zero.
         assert_eq!(
             days,
             vec![
                 (Some("2026-09-01".into()), "-40.00".into()),
                 (Some("2026-09-02".into()), "46.00".into()),
-                (Some("2026-09-03".into()), "-7.00".into()),
-                (Some(today), "7.00".into()),
+                (Some("2026-09-03".into()), "0.00".into()),
             ]
         );
         let by_group = l.pnl(Some("a"), &f(PnlBucket::Group)).unwrap();
@@ -407,6 +405,29 @@ mod tests {
             .find(|r| r.bucket.as_deref() == Some("mom"))
             .unwrap();
         assert_eq!(mom.fees, "-2.00");
+    }
+
+    #[test]
+    fn reversal_lands_in_the_original_meta_bucket() {
+        let mut l = ledger_with(&[("a", "USD", 2)]);
+        let wrong = l
+            .add(&AddRequest {
+                group: Some("dir:x".into()),
+                meta: Some(r#"{"strategy":"dir"}"#.into()),
+                ..req("a", "-12", Kind::Trade)
+            })
+            .unwrap()
+            .entry;
+        l.reverse_entry(wrong.id, None, None).unwrap();
+        let out = l
+            .pnl(Some("a"), &f(PnlBucket::Meta("strategy".into())))
+            .unwrap();
+        let buckets: Vec<(Option<String>, String)> = out[0]
+            .rows
+            .iter()
+            .map(|r| (r.bucket.clone(), r.net.clone()))
+            .collect();
+        assert_eq!(buckets, vec![(Some("dir".into()), "0.00".into())]);
     }
 
     #[test]

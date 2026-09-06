@@ -120,6 +120,7 @@ pub struct TransferArgs {
     /// External id; unique per account, makes the call idempotent
     #[arg(long = "ref")]
     pub reference: Option<String>,
+    /// Free-text note
     #[arg(long)]
     pub memo: Option<String>,
     /// When it happened (RFC 3339 or YYYY-MM-DD); default now
@@ -135,17 +136,20 @@ pub struct TransferArgs {
 
 #[derive(Args, Debug)]
 pub struct ReverseArgs {
+    /// Entry to reverse (or pass --group instead)
     #[arg(required_unless_present = "group", conflicts_with = "group")]
     pub entry_id: Option<i64>,
     /// Reverse every entry in this group that has not been reversed yet
     #[arg(long)]
     pub group: Option<String>,
+    /// Free-text note on the reversal
     #[arg(long)]
     pub memo: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct BalanceArgs {
+    /// Account name; every account when omitted
     pub account: Option<String>,
     /// Balance as of this time (requires an account)
     #[arg(long, requires = "account")]

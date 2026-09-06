@@ -32,7 +32,7 @@ Set `LEDGER_ACTOR=<your agent name>` so the audit trail says who wrote each row.
 
 ## Refs make writes idempotent
 
-`--ref` is unique per account. Replaying the same ref with the same amount returns the original with `"duplicate": true`, exit 0. Same ref, different amount is `ref_conflict`, exit 2, nothing written. Only kind and amount are compared: a replay with a different `--meta`, `--group` or `--ts` is still a duplicate and changes nothing. Fix wrong metadata with `reverse` and a new entry under a new ref.
+`--ref` is unique per account. Replaying the same ref with the same amount returns the original with `"duplicate": true`, exit 0. Same ref, different amount is `ref_conflict`, exit 2, nothing written. Only kind and amount are compared: a replay with a different `--meta`, `--group` or `--ts` is still a duplicate and changes nothing. Fix wrong metadata with `reverse` and a new entry under a new ref. A reversed entry still owns its ref: replaying it returns that entry with `"duplicate": true` and `reversed_by` set, and writes nothing.
 
 | movement | ref |
 |---|---|
@@ -40,6 +40,7 @@ Set `LEDGER_ACTOR=<your agent name>` so the audit trail says who wrote each row.
 | fill | the order or fill id |
 | fee on an order | `fee:<order-id>` (the order id itself is taken by the fill) |
 | resolution payout | the venue's settlement id or redeem tx; `settle:<market>` when it has none |
+| corrected re-entry of a reversed fill | `<original ref>:v2` (the original ref stays with the reversed entry) |
 
 ## Kinds and signs
 
@@ -67,13 +68,13 @@ Negative balances are allowed; the ledger does not know your funding.
 - `ledger group <id> --json` lists every leg across accounts with `net` per currency. There is no FX: USDC and USD stay separate; add them yourself if you treat them at par.
 - `ledger pnl --by meta:strategy` buckets by a meta key; entries without the key land in the `null` bucket, printed as `null` in the table. Conventional keys, all strings: `market`, `side`, `price`, `shares`, `strategy`, `venue`. Extra keys (`outcome`, `fee_type`, ...) are fine.
 - `pnl` excludes `deposit`, `withdrawal`, `transfer` automatically; `trade`, `settlement`, `fee`, `adjustment`, `other` count. A `reversal` counts under the kind it reverses, so a reversed adjustment shows as zero in `adjustments`.
-- `pnl` is cash only, so an open position reads as a loss equal to its cost until you mark it. Write the venue's current value of each open group to a JSON file, amounts as strings with up to the account's decimals, `{"farm:whistler-crompton": "21.60", "dir:laprairie": "4.20"}`, and pass `--marks marks.json`. Every row gains `open_value` (the marks of the groups in that row summed, `null` when none) and `mtm` (`net` + `open_value`). Use it with `--by total`, `group` or `meta:<key>`. A group that exists nowhere is `group_not_found`, a typo. A group outside the report (another account, before `--since`) is skipped silently. Marks are not stored; keep the file next to the balance snapshot it came from.
+- `pnl` is cash only, so an open position reads as a loss equal to its cost until you mark it. Write the venue's current value of each open group to a JSON file, amounts as strings with up to the account's decimals, `{"farm:whistler-crompton": "21.60", "dir:laprairie": "4.20"}`, and pass `--marks marks.json`. Every row gains `open_value` (the marks of the groups in that row summed, `null` when none) and `mtm` (`net` + `open_value`); JSON always carries both, the table shows them only with `--marks`. Use it with `--by total`, `group` or `meta:<key>`. A group that exists nowhere is `group_not_found`, a typo. A group outside the report (another account, before `--since`) is skipped silently. Marks are not stored; keep the file next to the balance snapshot it came from.
 - One marks file per account. A two-venue arbitrage group has one value per venue in that venue's currency, and a marked group that lands in two rows is `mark_ambiguous`, so write `poly-marks.json` and `kalshi-marks.json` and run `pnl poly-usdc --marks poly-marks.json`, then `pnl kalshi-usd --marks kalshi-marks.json`. The tool never adds USDC `mtm` to USD `mtm`; you do, at par if that is your policy. A position split across `--by day` rows cannot be marked either. The `adjustment` a reconcile posts has no group or meta, so it sits in the `null` bucket: inside `--by total` `mtm`, outside every strategy and group row.
 - USDC on Polygon to USD at Kalshi is a `withdrawal` plus a `deposit`, optionally sharing a `--group`. `transfer` is only for same-currency accounts.
 
 ## Fixing mistakes
 
-`ledger reverse <entry-id>` or `ledger reverse --group <id>` (every entry not yet reversed). Reversals inherit the group, so a reversed position nets to zero. Never open the SQLite file directly; it refuses updates and deletes.
+`ledger reverse <entry-id>` or `ledger reverse --group <id>` (every entry not yet reversed). A reversal copies the original's `ts`, `group` and `meta`, so the mistake nets to zero in every view (`balance --at`, `--by day`, `--by group`, `--by meta:<key>`); `recorded_at` says when you corrected it. A reversal cannot be reversed (`cannot_reverse_reversal`); to undo one, add the original again under a new ref. Never open the SQLite file directly; it refuses updates and deletes.
 
 ## Reading results
 
@@ -90,5 +91,5 @@ After a replay, compare `entries` counts from `balance` before and after: unchan
 - Retrying a successful `reconcile`. Each run adds a snapshot row; the second one changes nothing.
 - Passing a stale `--ts` for a balance you fetched just now. The book as of that time excludes later entries and the adjustment lands in the past. For a live balance omit `--ts`; for a real historical statement use its time with `--no-adjust`.
 - Summing `net` across currencies inside the tool. It never does; you do, explicitly.
-- Passing today's date as `--until` for today's PnL. A bare date is 00:00 UTC, so `--until 2026-09-06` excludes the whole day. Today is `--since 2026-09-06` alone; a closed day is `--until 2026-09-06T23:59:59Z`.
+- Passing today's date as `--until` for today's PnL. A bare date is 00:00 UTC, so `--until 2026-09-06` excludes the whole day. Today is `--since 2026-09-06` alone; a closed day is `--since 2026-09-05 --until 2026-09-05T23:59:59.999Z`.
 - Reading a strategy's `net` as how it is doing while its positions are open. That is cash flow; pass `--marks` and read `mtm`.
