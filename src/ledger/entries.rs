@@ -277,25 +277,6 @@ fn reverse_all(
     Ok(out)
 }
 
-// Temporary until reports.rs (Task 7) provides the real `balance`.
-#[cfg(test)]
-impl Ledger {
-    pub(crate) fn balance(
-        &self,
-        account: &str,
-        at: Option<&str>,
-    ) -> Result<crate::model::BalanceAt> {
-        let acc = account_by_name(&self.conn, account)?;
-        let minor = balance_minor(&self.conn, acc.id, at)?;
-        Ok(crate::model::BalanceAt {
-            account: acc.name,
-            currency: acc.currency,
-            balance: format_amount(minor, acc.decimals),
-            at: at.map(str::to_string),
-        })
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

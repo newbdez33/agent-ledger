@@ -5,8 +5,10 @@
 
 mod accounts;
 mod entries;
+mod reports;
 
 pub use entries::{AddRequest, TransferRequest};
+pub use reports::HistoryFilter;
 
 use std::path::Path;
 
