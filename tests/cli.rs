@@ -624,3 +624,121 @@ fn pnl_marks_add_open_value_and_mtm() {
         .stderr(predicates::str::contains("io_error"))
         .stderr(predicates::str::contains("nope.json"));
 }
+
+#[test]
+fn pnl_table_labels_the_null_bucket_null_except_under_by_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l.db");
+    with_account(&db);
+    ledger(&db)
+        .args(["add", "poly-usdc", "-5", "--kind", "trade"])
+        .assert()
+        .success();
+    ledger(&db)
+        .args([
+            "add",
+            "poly-usdc",
+            "-2",
+            "--kind",
+            "fee",
+            "--group",
+            "g1",
+            "--meta",
+            r#"{"strategy":"arb"}"#,
+        ])
+        .assert()
+        .success();
+    let table = |by: &str| {
+        String::from_utf8(
+            ledger(&db)
+                .args(["pnl", "poly-usdc", "--by", by])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    };
+    for by in ["group", "meta:strategy"] {
+        let t = table(by);
+        assert!(t.lines().any(|l| l.starts_with("null ")), "--by {by}:\n{t}");
+        assert!(
+            !t.lines().any(|l| l.starts_with("total")),
+            "--by {by}:\n{t}"
+        );
+    }
+    let t = table("total");
+    assert!(t.lines().any(|l| l.starts_with("total ")), "{t}");
+    assert!(!t.contains("null"), "{t}");
+}
+
+#[test]
+fn reversal_copies_ts_group_and_meta_so_every_view_nets_to_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l.db");
+    with_account(&db);
+    let added = json(
+        &ledger(&db)
+            .args([
+                "--json",
+                "add",
+                "poly-usdc",
+                "-12",
+                "--kind",
+                "trade",
+                "--ref",
+                "o2",
+                "--group",
+                "dir:x",
+                "--meta",
+                r#"{"strategy":"dir"}"#,
+                "--ts",
+                "2026-09-06T09:00:00Z",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let id = added["entry"]["id"].as_i64().unwrap().to_string();
+    let rev = json(
+        &ledger(&db)
+            .args(["--json", "reverse", &id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let r = &rev["entries"][0];
+    assert_eq!(r["ts"], "2026-09-06T09:00:00.000Z");
+    assert_eq!(r["group_id"], "dir:x");
+    assert_eq!(r["meta"]["strategy"], "dir");
+    assert_eq!(r["amount"], "12.000000");
+    assert_ne!(r["recorded_at"], r["ts"]);
+
+    // Book as of a later instant no longer carries the mistake.
+    let at = json(
+        &ledger(&db)
+            .args([
+                "--json",
+                "balance",
+                "poly-usdc",
+                "--at",
+                "2026-09-06T10:00:00Z",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(at["balance"], "0.000000");
+
+    // The strategy report nets to zero in its own bucket; nothing leaks into null.
+    let v = json(
+        &ledger(&db)
+            .args(["--json", "pnl", "poly-usdc", "--by", "meta:strategy"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let rows = v["accounts"][0]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["bucket"], "dir");
+    assert_eq!(rows[0]["net"], "0.000000");
+}

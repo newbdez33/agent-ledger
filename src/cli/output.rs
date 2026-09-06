@@ -25,6 +25,9 @@ pub enum Output {
         /// Whether marks were supplied; drives the table columns, not part of the JSON.
         #[serde(skip)]
         marked: bool,
+        /// Whether `--by total` was used, so the one `null` row is the total; not part of the JSON.
+        #[serde(skip)]
+        total: bool,
     },
     Reconcile(ReconcileResult),
     Snapshots(SnapshotList),

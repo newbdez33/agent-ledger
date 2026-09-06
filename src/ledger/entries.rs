@@ -10,7 +10,6 @@ use super::{
 use crate::error::{LedgerError, Result};
 use crate::model::{AddResult, Entry, Kind, ReverseResult, ShowResult, TransferResult};
 use crate::money::format_amount;
-use crate::time;
 
 #[derive(Clone, Debug)]
 pub struct AddRequest {
@@ -253,20 +252,25 @@ fn reverse_all(
             return Err(LedgerError::AlreadyReversed(t.id, by));
         }
     }
-    let ts = time::now();
     let mut out = Vec::with_capacity(targets.len());
     for t in targets {
         let account = account_by_name(tx, &t.account)?;
+        // The reversal mirrors the original in every view: same ts, group and meta, opposite
+        // amount. recorded_at, set by write_entry, says when the correction was made.
         let new = NewEntry {
             account: &account,
-            ts: ts.clone(),
+            ts: t.ts.clone(),
             kind: Kind::Reversal,
             amount: -t.amount_minor,
             reference: None,
             memo: memo.clone(),
             actor: actor.clone(),
             group_id: t.group_id.clone(),
-            meta: None,
+            meta: t
+                .meta
+                .as_ref()
+                .map(super::meta_value_to_storage)
+                .transpose()?,
             reverses_id: Some(t.id),
         };
         let Written::Inserted(id) = write_entry(tx, &new)? else {
@@ -577,5 +581,33 @@ pub(crate) mod tests {
             l.reverse_group(" ", None, None),
             Err(LedgerError::InvalidGroup)
         ));
+    }
+
+    #[test]
+    fn reversal_inherits_ts_group_and_meta_of_the_original() {
+        let mut l = ledger_with(&[("a", "USD", 2)]);
+        let original = l
+            .add(&AddRequest {
+                ts: Some("2026-09-05T10:00:00Z".into()),
+                group: Some("dir:x".into()),
+                meta: Some(r#"{"strategy":"dir","market":"x"}"#.into()),
+                ..req("a", "-12", Kind::Trade)
+            })
+            .unwrap()
+            .entry;
+        let rev = l.reverse_entry(original.id, None, None).unwrap().entries[0].clone();
+        assert_eq!(rev.ts, "2026-09-05T10:00:00.000Z");
+        assert_eq!(rev.ts, original.ts);
+        assert_eq!(rev.group_id.as_deref(), Some("dir:x"));
+        assert_eq!(rev.meta, original.meta);
+        assert_eq!(rev.meta.as_ref().unwrap()["strategy"], "dir");
+        assert_eq!(rev.amount, "12.00");
+        // recorded_at is the moment of the correction, not the original event time.
+        assert!(
+            rev.recorded_at > rev.ts,
+            "{} vs {}",
+            rev.recorded_at,
+            rev.ts
+        );
     }
 }
