@@ -16,6 +16,12 @@ make install          # cargo install + symlink skill/ledger into ~/.claude/skil
 ledger --help
 ```
 
+To pin a version without cloning (binary only, no skill symlink):
+
+```sh
+cargo install --git https://github.com/newbdez33/agent-ledger --tag v0.1.0
+```
+
 Every command takes `--json`. The database lives at `--db PATH`, else `$LEDGER_DB`, else `~/.agent-ledger/ledger.db`. Set `LEDGER_ACTOR` so the audit trail says who wrote each row.
 
 ## What it looks like
