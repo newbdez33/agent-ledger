@@ -2,7 +2,7 @@
 
 **Goal:** An append-only, SQLite-backed ledger that AI agents drive from the shell. It records balance movements (deposits, withdrawals, trades, fees, settlements) across multiple accounts and currencies, links the legs of a position so realized PnL is one query, reconciles book balances against observed balances, and keeps a complete audit trail that no caller can rewrite.
 
-**Non-goal:** Double-entry bookkeeping with a chart of accounts, multi-user authentication, a network service or HTTP API, mark-to-market valuation of open positions, FX conversion between currencies, automatic ingestion from exchanges or chains (the caller fetches and posts), and reporting beyond balance, history, realized PnL, and export.
+**Non-goal:** Double-entry bookkeeping with a chart of accounts, multi-user authentication, a network service or HTTP API, valuing open positions (the caller may hand `pnl` its own marks; the ledger never computes one), FX conversion between currencies, automatic ingestion from exchanges or chains (the caller fetches and posts), and reporting beyond balance, history, realized PnL, and export.
 
 ## Context
 
@@ -23,7 +23,7 @@ The immediate consumers are a Polymarket short-window trading bot, whose only wa
 - **Realized PnL is the primary question.** Over a period, per strategy, per position. Capital movements (deposits, withdrawals, transfers) must be excluded from it automatically. Hence a `pnl` report.
 - **History has to be backfilled** from on-chain and exchange data, atomically and idempotently. Hence `import`.
 - **Losing positions settle to zero cash** and therefore produce no entry. The group's net is the loss; nothing extra is recorded.
-- **The ledger tracks cash only.** Open-position value comes from the venue. Equity is ledger balance plus venue-reported position value, computed by the caller.
+- **The ledger tracks cash only.** Open-position value comes from the venue. Equity is ledger balance plus venue-reported position value, computed by the caller. The caller can hand those values to `pnl --marks`, so mark-to-market per position or strategy is one command instead of a join outside the tool.
 
 ## Users and interface
 
@@ -156,6 +156,8 @@ Entries without `--ref` are never deduplicated.
 
 **PnL.** `pnl [<account>] [--since] [--until] [--by total|day|week|month|group|meta:<key>]` reports realized cash PnL. Capital movements are excluded: `deposit`, `withdrawal`, `transfer`, and reversals of those. Every other entry counts, and a `reversal` counts under the kind of the entry it reverses. Columns: `trades`, `settlements`, `fees`, `adjustments`, `other`, `net`. Without `--by` there is one row per account; with `--by`, one row per bucket, where `day`/`week`/`month` bucket on `ts` (`%Y-%m-%d`, `%Y-W%W`, `%Y-%m`), `group` buckets on `group_id`, and `meta:<key>` buckets on `json_extract(meta, '$.<key>')`. Entries without the bucket value fall in a `null` bucket. Without `<account>` every account is reported, each in its own currency.
 
+With `--marks <file>`, a JSON object of group id to amount string (`{"farm:whistler": "21.60"}`), every row also carries `open_value`, the sum of the marks of the groups whose counted entries fall in that row, and `mtm`, `net` plus `open_value`. Marks are parsed with the account's decimals, never rounded; zero and negative values are allowed. A row with no marked group reports `open_value: null` and `mtm` equal to `net`, and without `--marks` every row does, so the JSON shape is fixed. A mark whose group has no entries anywhere is `group_not_found`, a typo. A mark whose group exists but has no counted entry in the report, because it sits on another account or outside `--since`/`--until`, is ignored, so a file may also hold marks for groups on other accounts. A marked group whose counted entries fall in more than one row (two accounts, two `meta` values, or split across `day`/`week`/`month` buckets) is `mark_ambiguous` and nothing is reported. Marks are never stored.
+
 **Import.** `import [--dry-run]` reads JSON Lines from stdin, one entry per line:
 
 ```json
@@ -185,6 +187,7 @@ ledger [--db <path>] [--json] [--actor <name>] <command>
       [--kind <kind>] [--group <id>]
   group <id>
   pnl [<account>] [--since <rfc3339>] [--until <rfc3339>] [--by total|day|week|month|group|meta:<key>]
+      [--marks <file>]
   reconcile <account> --observed <amount> [--source <text>] [--no-adjust] [--ts <rfc3339>]
   snapshots <account> [--limit <n>]
   import [--dry-run]
@@ -229,7 +232,7 @@ The entry object, used everywhere an entry appears:
 | `balance <a>` | `{account, currency, balance, at}` |
 | `history`, `export --format json` | `{account, currency, entries: [entry + balance_after, …]}` |
 | `group` | `{group, entries: [entry, …], net: {"USDC": "3.000000", "USD": "-52.00"}}` |
-| `pnl` | `{accounts: [{account, currency, rows: [{bucket, trades, settlements, fees, adjustments, other, net}, …]}, …]}` |
+| `pnl` | `{accounts: [{account, currency, rows: [{bucket, trades, settlements, fees, adjustments, other, net, open_value, mtm}, …]}, …]}`; `open_value` is `null` and `mtm` equals `net` unless `--marks` valued a group in the row |
 | `reconcile` | `{snapshot, adjustment}` with `adjustment` an entry or `null` |
 | `snapshots` | `{account, snapshots: [{id, ts, observed, book, diff, adjustment_entry_id, source}, …]}` |
 | `import` | `{imported, duplicates, dry_run, entries: [entry, …]}` |
@@ -251,7 +254,7 @@ Import errors add `"line": <n>` to the object.
 | 1 | usage error, I/O error, database error |
 | 2 | domain error, one of the codes below |
 
-Domain error codes (exit 2): `account_not_found`, `account_exists`, `invalid_account_name`, `invalid_currency`, `same_account`, `entry_not_found`, `group_not_found`, `currency_mismatch`, `precision_exceeded`, `invalid_amount`, `zero_amount`, `invalid_sign`, `invalid_kind`, `invalid_timestamp`, `invalid_group`, `invalid_meta`, `invalid_bucket`, `invalid_json`, `ref_conflict`, `already_reversed`, `cannot_reverse_reversal`, `nothing_to_reverse`. Infrastructure codes (exit 1): `database_error`, `io_error`.
+Domain error codes (exit 2): `account_not_found`, `account_exists`, `invalid_account_name`, `invalid_currency`, `same_account`, `entry_not_found`, `group_not_found`, `currency_mismatch`, `precision_exceeded`, `invalid_amount`, `zero_amount`, `invalid_sign`, `invalid_kind`, `invalid_timestamp`, `invalid_group`, `invalid_meta`, `invalid_bucket`, `mark_ambiguous`, `invalid_json`, `ref_conflict`, `already_reversed`, `cannot_reverse_reversal`, `nothing_to_reverse`. Infrastructure codes (exit 1): `database_error`, `io_error`.
 
 ### Companion skill
 
@@ -278,7 +281,7 @@ Library tests run against a temporary database file:
 - precision: 7 decimals on a 6-decimal account rejected; 6 accepted exactly.
 - history: running balance correct under `--limit`, `--since`, `--group` filters; `--limit 0` unlimited.
 - group: cross-account entries, per-currency nets, fully reversed group nets to zero.
-- pnl: deposits/withdrawals/transfers excluded; reversal folds into original kind; bucketing by day, group, and meta key; null bucket for missing values.
+- pnl: deposits/withdrawals/transfers excluded; reversal folds into original kind; bucketing by day, group, and meta key; null bucket for missing values; marks join into group, total and meta rows; unmarked rows carry `null` and `mtm` = `net`; unknown group rejected; out-of-report group ignored; group spanning rows rejected; mark precision follows the account.
 - import: all-or-nothing on error with line number; duplicates skipped and counted; numeric amount rejected; `--dry-run` writes nothing.
 - meta: non-object rejected; stored and returned verbatim.
 - sign rules per kind; zero rejected; uppercase currency normalization; case-insensitive account lookup.
@@ -313,6 +316,13 @@ Added by the quant/arbitrage review on 2026-09-06:
 | `pnl` kind ambiguous in a cash ledger | renamed to `settlement` |
 | snapshots unreadable | `snapshots <account>` command; `reconcile --ts` computes book as of that time |
 | reversing one leg of a caller group reversed everything | `reverse <id>` is single-entry (transfer sibling follows); `reverse --group` is explicit |
-| open-position value, FX | stay out of scope; caller combines ledger cash with venue positions |
+| open-position value, FX | stay out of scope; caller combines ledger cash with venue positions (revisited below: values may be handed to `pnl --marks`) |
+
+Added after the first full trading day, 2026-09-06 (issue #4):
+
+| gap | decision |
+|---|---|
+| open groups read as losses in `pnl`; agents joined venue values by hand | `pnl --marks <file>` takes caller-supplied values per group and adds `open_value` and `mtm` to every row; marks are never stored and the ledger still computes no valuation |
+| stored marks (`ledger mark`) and group open/closed state | deferred; the read-time join covers the reported case, and a stored-mark table could feed the same output shape later |
 
 Known caveat: the binary name `ledger` collides with ledger-cli if that is installed. Rename the installed binary in that case; the skill refers to the command by name, so update it too.

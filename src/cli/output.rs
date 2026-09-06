@@ -22,6 +22,9 @@ pub enum Output {
     Group(GroupView),
     Pnl {
         accounts: Vec<AccountPnl>,
+        /// Whether marks were supplied; drives the table columns, not part of the JSON.
+        #[serde(skip)]
+        marked: bool,
     },
     Reconcile(ReconcileResult),
     Snapshots(SnapshotList),

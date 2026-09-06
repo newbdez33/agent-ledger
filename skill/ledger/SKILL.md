@@ -1,13 +1,13 @@
 ---
 name: ledger
-description: Use when an agent moves money, records a trade fill, fee, redemption or settlement, checks a wallet or venue balance, needs realized PnL for a period, strategy or arbitrage position, backfills trading history, or has just fetched a live balance from an exchange or chain and the `ledger` CLI is installed
+description: Use when an agent moves money, records a trade fill, fee, redemption or settlement, checks a wallet or venue balance, needs realized or mark-to-market PnL for a period, strategy or arbitrage position, backfills trading history, or has just fetched a live balance from an exchange or chain and the `ledger` CLI is installed
 ---
 
 # Ledger
 
 `ledger` is an append-only SQLite cash ledger: one binary, one file, exact money, JSON output.
 It records cash movements per account and reconciles them against what the venue or chain reports.
-It does not value open positions; equity = `ledger balance` + venue-reported position value.
+It does not value open positions: fetch each open position's value from the venue yourself, then hand them to `pnl --marks` for mark-to-market; equity is the `ledger balance` figure plus those values, added by you.
 Every command takes `--json` and `--help`; the file is `--db PATH`, else `$LEDGER_DB`, else `~/.agent-ledger/ledger.db`.
 
 ## When to use
@@ -26,7 +26,7 @@ Every command takes `--json` and `--help`; the file is `--db PATH`, else `$LEDGE
 3. **Reconcile once per fetched balance.** `reconcile` compares observed with the book **as of `--ts`**, the same number `balance --at <ts>` shows, and posts the difference as an `adjustment` at that time. Without `--ts` it uses now or the latest booked entry, whichever is later, so the whole book counts. That is the right call for a balance you just fetched.
    `ledger reconcile poly-usdc --observed 123.6075 --source polygon-rpc --json`
    A historical statement (month-end, a past snapshot) gets its own `--ts`; a nonzero diff there lands in the past and shifts every later balance, so pass `--no-adjust` to record the check without changing the books.
-4. **Read**: `balance [account]`, `history <account>`, `group <id>`, `pnl [account] --by total|day|week|month|group|meta:<key>`, `snapshots <account>`, `export <account> --format csv|json`.
+4. **Read**: `balance [account]`, `history <account>`, `group <id>`, `pnl [account] --by total|day|week|month|group|meta:<key> [--marks marks.json]`, `snapshots <account>`, `export <account> --format csv|json`.
 
 Set `LEDGER_ACTOR=<your agent name>` so the audit trail says who wrote each row.
 
@@ -67,6 +67,8 @@ Negative balances are allowed; the ledger does not know your funding.
 - `ledger group <id> --json` lists every leg across accounts with `net` per currency. There is no FX: USDC and USD stay separate; add them yourself if you treat them at par.
 - `ledger pnl --by meta:strategy` buckets by a meta key; entries without the key land in the `null` bucket. Conventional keys, all strings: `market`, `side`, `price`, `shares`, `strategy`, `venue`. Extra keys (`outcome`, `fee_type`, ...) are fine.
 - `pnl` excludes `deposit`, `withdrawal`, `transfer` automatically; `trade`, `settlement`, `fee`, `adjustment`, `other` count. A `reversal` counts under the kind it reverses, so a reversed adjustment shows as zero in `adjustments`.
+- `pnl` is cash only, so an open position reads as a loss equal to its cost until you mark it. Write the venue's current value of each open group to a JSON file, amounts as strings with up to the account's decimals, `{"farm:whistler-crompton": "21.60", "dir:laprairie": "4.20"}`, and pass `--marks marks.json`. Every row gains `open_value` (the marks of the groups in that row summed, `null` when none) and `mtm` (`net` + `open_value`). Use it with `--by total`, `group` or `meta:<key>`. A group that exists nowhere is `group_not_found`, a typo. A group outside the report (another account, before `--since`) is skipped silently. Marks are not stored; keep the file next to the balance snapshot it came from.
+- One marks file per account. A two-venue arbitrage group has one value per venue in that venue's currency, and a marked group that lands in two rows is `mark_ambiguous`, so write `poly-marks.json` and `kalshi-marks.json` and run `pnl poly-usdc --marks poly-marks.json`, then `pnl kalshi-usd --marks kalshi-marks.json`. The tool never adds USDC `mtm` to USD `mtm`; you do, at par if that is your policy. A position split across `--by day` rows cannot be marked either. The `adjustment` a reconcile posts has no group or meta, so it sits in the `null` bucket: inside `--by total` `mtm`, outside every strategy and group row.
 - USDC on Polygon to USD at Kalshi is a `withdrawal` plus a `deposit`, optionally sharing a `--group`. `transfer` is only for same-currency accounts.
 
 ## Fixing mistakes
@@ -76,7 +78,7 @@ Negative balances are allowed; the ledger does not know your funding.
 ## Reading results
 
 Exit 0 success (including duplicates), 1 usage or IO, 2 domain error. Errors go to stderr as `{"error":{"code","message"}}` (`line` added for `import`). JSON amounts are strings.
-Shapes: `add` → `{entry, balance, duplicate}` where `balance` is the account's current balance (on a duplicate too); `account add` → `{account, duplicate}`; `balance` → `{accounts:[{account, currency, balance, entries, last_ts, last_reconciled_at}]}` and `balance <account> [--at]` → `{account, currency, balance, at}`; `history` → `{entries:[... balance_after]}`; `group` → `{entries, net}`; `pnl` → `{accounts:[{rows:[{bucket, trades, settlements, fees, adjustments, other, net}]}]}`; `reconcile` → `{snapshot, adjustment|null}`; `snapshots` → oldest first, last row is the latest.
+Shapes: `add` → `{entry, balance, duplicate}` where `balance` is the account's current balance (on a duplicate too); `account add` → `{account, duplicate}`; `balance` → `{accounts:[{account, currency, balance, entries, last_ts, last_reconciled_at}]}` and `balance <account> [--at]` → `{account, currency, balance, at}`; `history` → `{entries:[... balance_after]}`; `group` → `{entries, net}`; `pnl` → `{accounts:[{rows:[{bucket, trades, settlements, fees, adjustments, other, net, open_value, mtm}]}]}` where `open_value` is `null` and `mtm` equals `net` unless `--marks` valued a group in that row; `reconcile` → `{snapshot, adjustment|null}`; `snapshots` → oldest first, last row is the latest.
 After a replay, compare `entries` counts from `balance` before and after: unchanged means nothing double-counted.
 
 ## Common mistakes
@@ -88,3 +90,4 @@ After a replay, compare `entries` counts from `balance` before and after: unchan
 - Retrying a successful `reconcile`. Each run adds a snapshot row; the second one changes nothing.
 - Passing a stale `--ts` for a balance you fetched just now. The book as of that time excludes later entries and the adjustment lands in the past. For a live balance omit `--ts`; for a real historical statement use its time with `--no-adjust`.
 - Summing `net` across currencies inside the tool. It never does; you do, explicitly.
+- Reading a strategy's `net` as how it is doing while its positions are open. That is cash flow; pass `--marks` and read `mtm`.

@@ -207,6 +207,10 @@ pub struct PnlRow {
     pub adjustments: String,
     pub other: String,
     pub net: String,
+    /// Sum of caller-supplied marks for the groups in this row; `None` when no group was marked.
+    pub open_value: Option<String>,
+    /// `net` plus `open_value`; equals `net` when nothing is marked.
+    pub mtm: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

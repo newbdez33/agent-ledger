@@ -8,7 +8,7 @@ mod reconcile;
 mod reports;
 
 pub use entries::{AddRequest, TransferRequest};
-pub use pnl::{PnlBucket, PnlFilter};
+pub use pnl::{Marks, PnlBucket, PnlFilter};
 pub use reconcile::ReconcileRequest;
 pub use reports::HistoryFilter;
 

@@ -478,3 +478,149 @@ fn export_csv_header_and_json_shape() {
     );
     assert_eq!(v["entries"][0]["balance_after"], "1.000000");
 }
+
+#[test]
+fn pnl_marks_add_open_value_and_mtm() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l.db");
+    with_account(&db);
+    ledger(&db)
+        .args(["account", "add", "kalshi-usd", "--currency", "USD"])
+        .assert()
+        .success();
+    let trade = |account: &str, amount: &str, group: &str, strategy: &str| {
+        ledger(&db)
+            .args([
+                "add",
+                account,
+                amount,
+                "--kind",
+                "trade",
+                "--group",
+                group,
+                "--meta",
+                &format!(r#"{{"strategy":"{strategy}"}}"#),
+            ])
+            .assert()
+            .success();
+    };
+    trade("poly-usdc", "-23.2", "farm:a", "farm");
+    trade("poly-usdc", "-7.44", "farm:b", "farm");
+    trade("poly-usdc", "-5", "dir:c", "dir");
+    trade("poly-usdc", "-45", "arb:1", "arb");
+    trade("kalshi-usd", "-52", "arb:1", "arb");
+
+    let marks = dir.path().join("marks.json");
+    let marks_arg = marks.to_str().unwrap().to_string();
+    std::fs::write(&marks, r#"{"farm:a":"21.60","farm:b":"5.5","dir:c":"0"}"#).unwrap();
+
+    let v = json(
+        &ledger(&db)
+            .args([
+                "--json",
+                "pnl",
+                "poly-usdc",
+                "--by",
+                "group",
+                "--marks",
+                &marks_arg,
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let rows = v["accounts"][0]["rows"].as_array().unwrap();
+    let row = |bucket: &str| rows.iter().find(|r| r["bucket"] == bucket).unwrap();
+    assert_eq!(row("farm:a")["net"], "-23.200000");
+    assert_eq!(row("farm:a")["open_value"], "21.600000");
+    assert_eq!(row("farm:a")["mtm"], "-1.600000");
+    assert_eq!(row("dir:c")["open_value"], "0.000000");
+    assert_eq!(row("dir:c")["mtm"], "-5.000000");
+    // arb:1 is not in the marks file: open_value stays null and mtm equals net.
+    assert_eq!(row("arb:1")["open_value"], Value::Null);
+    assert_eq!(row("arb:1")["mtm"], "-45.000000");
+
+    let v = json(
+        &ledger(&db)
+            .args([
+                "--json",
+                "pnl",
+                "poly-usdc",
+                "--by",
+                "meta:strategy",
+                "--marks",
+                &marks_arg,
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let farm = v["accounts"][0]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["bucket"] == "farm")
+        .unwrap();
+    assert_eq!(farm["net"], "-30.640000");
+    assert_eq!(farm["open_value"], "27.100000");
+    assert_eq!(farm["mtm"], "-3.540000");
+
+    // Without --marks the fields are still there: null and equal to net.
+    let v = json(
+        &ledger(&db)
+            .args(["--json", "pnl", "poly-usdc", "--by", "group"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    for r in v["accounts"][0]["rows"].as_array().unwrap() {
+        assert_eq!(r["open_value"], Value::Null);
+        assert_eq!(r["mtm"], r["net"]);
+    }
+    // The table shows the two columns only when marks were given.
+    let plain = ledger(&db)
+        .args(["pnl", "poly-usdc", "--by", "group"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&plain.stdout).contains("mtm"));
+    let marked = ledger(&db)
+        .args(["pnl", "poly-usdc", "--by", "group", "--marks", &marks_arg])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&marked.stdout);
+    assert!(
+        text.contains("open_value") && text.contains("mtm"),
+        "{text}"
+    );
+
+    // arb:1 has legs on both accounts, so one mark cannot be attributed to a single row.
+    std::fs::write(&marks, r#"{"arb:1":"10"}"#).unwrap();
+    let out = ledger(&db)
+        .args(["--json", "pnl", "--by", "group", "--marks", &marks_arg])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json(&out.stderr)["error"]["code"], "mark_ambiguous");
+
+    // A group id that exists nowhere is a typo, not something to ignore.
+    std::fs::write(&marks, r#"{"farm:zzz":"1"}"#).unwrap();
+    let out = ledger(&db)
+        .args(["--json", "pnl", "--by", "group", "--marks", &marks_arg])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(json(&out.stderr)["error"]["code"], "group_not_found");
+
+    // An unreadable marks file is an I/O error naming the path.
+    ledger(&db)
+        .args([
+            "--json",
+            "pnl",
+            "--marks",
+            dir.path().join("nope.json").to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("io_error"))
+        .stderr(predicates::str::contains("nope.json"));
+}

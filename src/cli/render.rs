@@ -96,24 +96,29 @@ pub fn render(out: &Output) -> String {
             }
             s
         }
-        Output::Pnl { accounts } => {
+        Output::Pnl { accounts, marked } => {
+            let mut headers = vec![
+                "bucket",
+                "trades",
+                "settlements",
+                "fees",
+                "adjustments",
+                "other",
+                "net",
+            ];
+            if *marked {
+                headers.extend(["open_value", "mtm"]);
+            }
+            let right: Vec<usize> = (1..headers.len()).collect();
             let mut s = String::new();
             for a in accounts {
                 s.push_str(&format!("{} ({})\n", a.account, a.currency));
                 s.push_str(&table(
-                    &[
-                        "bucket",
-                        "trades",
-                        "settlements",
-                        "fees",
-                        "adjustments",
-                        "other",
-                        "net",
-                    ],
+                    &headers,
                     &a.rows
                         .iter()
                         .map(|r| {
-                            vec![
+                            let mut cells = vec![
                                 r.bucket.clone().unwrap_or_else(|| "total".into()),
                                 r.trades.clone(),
                                 r.settlements.clone(),
@@ -121,10 +126,15 @@ pub fn render(out: &Output) -> String {
                                 r.adjustments.clone(),
                                 r.other.clone(),
                                 r.net.clone(),
-                            ]
+                            ];
+                            if *marked {
+                                cells.push(opt(&r.open_value));
+                                cells.push(r.mtm.clone());
+                            }
+                            cells
                         })
                         .collect::<Vec<_>>(),
-                    &[1, 2, 3, 4, 5, 6],
+                    &right,
                 ));
             }
             s
