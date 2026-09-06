@@ -4,6 +4,9 @@
 #![allow(dead_code)]
 
 mod accounts;
+mod entries;
+
+pub use entries::{AddRequest, TransferRequest};
 
 use std::path::Path;
 
