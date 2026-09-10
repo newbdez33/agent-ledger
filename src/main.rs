@@ -160,6 +160,7 @@ fn run(cli: Cli) -> Result<Output, LedgerError> {
             ts: r.ts,
             adjust: r.adjust,
             dry_run: r.dry_run,
+            memo: r.memo,
             actor,
         })?),
         Command::Snapshots(s) => Output::Snapshots(ledger.snapshots(&s.account, s.limit)?),

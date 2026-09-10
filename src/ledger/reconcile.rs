@@ -22,6 +22,8 @@ pub struct ReconcileRequest {
     pub adjust: bool,
     /// Compute observed, book and diff and write nothing.
     pub dry_run: bool,
+    /// Why the adjustment is right; appended to its generated memo. Only used with `adjust`.
+    pub memo: Option<String>,
     pub actor: Option<String>,
 }
 
@@ -149,9 +151,15 @@ impl Ledger {
                 amount: c.diff,
                 reference: None,
                 memo: Some(format!(
-                    "reconcile: observed {}, book {}",
+                    "reconcile: observed {}, book {}{}",
                     format_amount(c.observed, c.acc.decimals),
-                    format_amount(c.book, c.acc.decimals)
+                    format_amount(c.book, c.acc.decimals),
+                    req.memo
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|m| !m.is_empty())
+                        .map(|m| format!("; {m}"))
+                        .unwrap_or_default()
                 )),
                 actor: req.actor.clone(),
                 group_id: None,
@@ -225,6 +233,7 @@ mod tests {
             ts: None,
             adjust: false,
             dry_run: false,
+            memo: None,
             actor: Some("claude".into()),
         }
     }
@@ -276,6 +285,27 @@ mod tests {
         assert!(observed.snapshot.adjustment_entry_id.is_none());
         assert_eq!(l.balance("w", None).unwrap().balance, "10.000000");
         assert_eq!(l.snapshots("w", 0).unwrap().snapshots.len(), 2);
+    }
+
+    #[test]
+    fn adjustment_memo_appends_the_callers_reason() {
+        let mut l = ledger_with(&[("w", "USDC", 6)]);
+        l.add(&AddRequest {
+            ts: Some("2026-09-10T09:00:00Z".into()),
+            ..req("w", "128.57", Kind::Deposit)
+        })
+        .unwrap();
+        let r = l
+            .reconcile(&ReconcileRequest {
+                ts: Some("2026-09-10T10:00:00Z".into()),
+                memo: Some("support: on-chain fee, no activity row".into()),
+                ..adjusting("128")
+            })
+            .unwrap();
+        assert_eq!(
+            r.adjustment.unwrap().memo.as_deref(),
+            Some("reconcile: observed 128.000000, book 128.570000; support: on-chain fee, no activity row")
+        );
     }
 
     #[test]

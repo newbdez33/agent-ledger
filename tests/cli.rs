@@ -859,6 +859,34 @@ fn reconcile_observes_by_default_adjusts_on_request_and_dry_runs() {
         .unwrap();
     assert!(String::from_utf8_lossy(&table.stdout).contains("--adjust"));
 
+    // --memo rides on the adjustment; it needs --adjust.
+    let why = json(
+        &ledger(&db)
+            .args([
+                "--json",
+                "reconcile",
+                "poly-usdc",
+                "--observed",
+                "9.0",
+                "--ts",
+                "2026-09-08T11:00:00Z",
+                "--adjust",
+                "--memo",
+                "support: on-chain fee",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        why["adjustment"]["memo"],
+        "reconcile: observed 9.000000, book 9.500000; support: on-chain fee"
+    );
+    ledger(&db)
+        .args(["reconcile", "poly-usdc", "--observed", "1", "--memo", "x"])
+        .assert()
+        .code(1);
+
     // --no-adjust is gone, and --adjust with --dry-run is a usage error.
     ledger(&db)
         .args(["reconcile", "poly-usdc", "--observed", "1", "--no-adjust"])
