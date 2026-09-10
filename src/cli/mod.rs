@@ -51,7 +51,7 @@ pub enum Command {
     },
     /// Realized PnL, excluding deposits, withdrawals and transfers
     Pnl(PnlArgs),
-    /// Compare book balance with an observed balance and post an adjustment
+    /// Compare the book with an observed balance and record a snapshot; --adjust posts the difference
     Reconcile(ReconcileArgs),
     /// List reconciliation snapshots
     Snapshots(SnapshotsArgs),
@@ -222,7 +222,8 @@ pub struct ReconcileArgs {
     /// not booked yet
     #[arg(long, conflicts_with = "dry_run")]
     pub adjust: bool,
-    /// Why the adjustment is right (what the venue said); appended to its memo
+    /// Why the adjustment is right (what the venue said); appended to its memo, dropped when
+    /// nothing is posted
     #[arg(long, requires = "adjust")]
     pub memo: Option<String>,
     /// Report observed, book and diff; write nothing
