@@ -45,7 +45,10 @@ pub enum Command {
     /// List entries of an account with running balance
     History(HistoryArgs),
     /// Show every entry in a group across accounts
-    Group { id: String },
+    Group {
+        /// Group id, as given to --group
+        id: String,
+    },
     /// Realized PnL, excluding deposits, withdrawals and transfers
     Pnl(PnlArgs),
     /// Compare book balance with an observed balance and post an adjustment
@@ -214,8 +217,8 @@ pub struct ReconcileArgs {
     /// unchanged retry is a duplicate. Default: now, or the latest booked entry if that is later
     #[arg(long)]
     pub ts: Option<String>,
-    /// Post an adjustment entry for a nonzero diff (never a duplicate; a retry then finds diff 0
-    /// and posts nothing). Default: record the snapshot only, since a diff is usually activity
+    /// Post an adjustment entry for a nonzero diff (a nonzero diff always posts; a retry then
+    /// finds diff 0 and posts nothing). Default: record the snapshot only, since a diff is usually activity
     /// not booked yet
     #[arg(long, conflicts_with = "dry_run")]
     pub adjust: bool,
@@ -245,6 +248,7 @@ pub struct ImportArgs {
 
 #[derive(Args, Debug)]
 pub struct ExportArgs {
+    /// Account name
     pub account: String,
     #[arg(long, value_enum)]
     pub format: ExportFormat,
