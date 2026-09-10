@@ -1,10 +1,10 @@
 //! Reconciliation against observed balances.
 
-use rusqlite::{params, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::{
     account_by_name, balance_minor, load_entry, parse_account_amount, resolve_ts, write_entry,
-    Ledger, NewEntry, Written,
+    AccountRow, Ledger, NewEntry, Written,
 };
 use crate::error::Result;
 use crate::model::{Kind, ReconcileResult, Snapshot, SnapshotList};
@@ -17,7 +17,11 @@ pub struct ReconcileRequest {
     pub observed: String,
     pub source: Option<String>,
     pub ts: Option<String>,
+    /// Post an `adjustment` for a nonzero diff. Off by default: in a live loop a diff is usually
+    /// activity that has not been booked yet, not a discrepancy.
     pub adjust: bool,
+    /// Compute observed, book and diff and write nothing.
+    pub dry_run: bool,
     pub actor: Option<String>,
 }
 
@@ -39,43 +43,115 @@ fn snapshot_from_row(r: &Row<'_>) -> rusqlite::Result<Snapshot> {
     })
 }
 
+/// One observation compared with the book as of its time.
+struct Comparison {
+    acc: AccountRow,
+    ts: String,
+    observed: i64,
+    book: i64,
+    diff: i64,
+    source: Option<String>,
+}
+
+fn compare(conn: &Connection, req: &ReconcileRequest) -> Result<Comparison> {
+    let acc = account_by_name(conn, &req.account)?;
+    let observed = parse_account_amount(&req.observed, &acc)?;
+    let ts = match req.ts.as_deref() {
+        Some(t) => resolve_ts(Some(t))?,
+        // An implicit reconcile must see the whole book, even entries stamped with a venue
+        // time later than this machine's clock. Explicit --ts is the only way to go historical.
+        None => {
+            let now = time::now();
+            let latest: Option<String> = conn.query_row(
+                "SELECT MAX(ts) FROM entries WHERE account_id = ?1",
+                params![acc.id],
+                |r| r.get(0),
+            )?;
+            match latest {
+                Some(l) if l > now => l,
+                _ => now,
+            }
+        }
+    };
+    let book = balance_minor(conn, acc.id, Some(&ts))?;
+    Ok(Comparison {
+        diff: observed - book,
+        acc,
+        ts,
+        observed,
+        book,
+        source: req.source.as_deref().map(|s| s.trim().to_string()),
+    })
+}
+
+/// The snapshot that already records this exact observation, if any. A snapshot is the fact
+/// "source S observed X at T against book B"; the same fact is never stored twice.
+fn existing_snapshot(conn: &Connection, c: &Comparison) -> Result<Option<Snapshot>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "{SNAPSHOT_SELECT} WHERE s.account_id = ?1 AND s.ts = ?2 AND s.observed = ?3 \
+                 AND s.book = ?4 AND s.source IS ?5 ORDER BY s.id DESC LIMIT 1"
+            ),
+            params![c.acc.id, c.ts, c.observed, c.book, c.source],
+            snapshot_from_row,
+        )
+        .optional()?)
+}
+
 impl Ledger {
     pub fn reconcile(&mut self, req: &ReconcileRequest) -> Result<ReconcileResult> {
+        if req.dry_run {
+            let c = compare(&self.conn, req)?;
+            let duplicate = existing_snapshot(&self.conn, &c)?.is_some();
+            let d = c.acc.decimals;
+            return Ok(ReconcileResult {
+                snapshot: Snapshot {
+                    id: None,
+                    account: c.acc.name,
+                    ts: c.ts,
+                    observed: format_amount(c.observed, d),
+                    book: format_amount(c.book, d),
+                    diff: format_amount(c.diff, d),
+                    adjustment_entry_id: None,
+                    source: c.source,
+                },
+                adjustment: None,
+                duplicate,
+                dry_run: true,
+            });
+        }
+
         let tx = self.write_tx()?;
-        let acc = account_by_name(&tx, &req.account)?;
-        let observed = parse_account_amount(&req.observed, &acc)?;
-        let ts = match req.ts.as_deref() {
-            Some(t) => resolve_ts(Some(t))?,
-            // An implicit reconcile must see the whole book, even entries stamped with a venue
-            // time later than this machine's clock. Explicit --ts is the only way to go historical.
-            None => {
-                let now = time::now();
-                let latest: Option<String> = tx.query_row(
-                    "SELECT MAX(ts) FROM entries WHERE account_id = ?1",
-                    params![acc.id],
-                    |r| r.get(0),
-                )?;
-                match latest {
-                    Some(l) if l > now => l,
-                    _ => now,
-                }
+        let c = compare(&tx, req)?;
+        let posts_adjustment = c.diff != 0 && req.adjust;
+        if !posts_adjustment {
+            if let Some(existing) = existing_snapshot(&tx, &c)? {
+                let adjustment = match existing.adjustment_entry_id {
+                    Some(id) => Some(load_entry(&tx, id)?),
+                    None => None,
+                };
+                return Ok(ReconcileResult {
+                    snapshot: existing,
+                    adjustment,
+                    duplicate: true,
+                    dry_run: false,
+                });
             }
-        };
-        let book = balance_minor(&tx, acc.id, Some(&ts))?;
-        let diff = observed - book;
+        }
 
         // The adjustment goes in first so the snapshot can reference it: snapshots are append-only.
-        let adjustment = if diff != 0 && req.adjust {
+        let adjustment = if posts_adjustment {
             let new = NewEntry {
-                account: &acc,
-                ts: ts.clone(),
+                account: &c.acc,
+                ts: c.ts.clone(),
                 kind: Kind::Adjustment,
-                amount: diff,
+                amount: c.diff,
                 reference: None,
                 memo: Some(format!(
                     "reconcile: observed {}, book {}",
-                    format_amount(observed, acc.decimals),
-                    format_amount(book, acc.decimals)
+                    format_amount(c.observed, c.acc.decimals),
+                    format_amount(c.book, c.acc.decimals)
                 )),
                 actor: req.actor.clone(),
                 group_id: None,
@@ -94,13 +170,13 @@ impl Ledger {
             "INSERT INTO snapshots (account_id, ts, observed, book, diff, adjustment_entry_id, source) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
-                acc.id,
-                ts,
-                observed,
-                book,
-                diff,
+                c.acc.id,
+                c.ts,
+                c.observed,
+                c.book,
+                c.diff,
                 adjustment.as_ref().map(|e| e.id),
-                req.source.as_deref().map(str::trim)
+                c.source
             ],
         )?;
         let snapshot_id = tx.last_insert_rowid();
@@ -113,6 +189,8 @@ impl Ledger {
         Ok(ReconcileResult {
             snapshot,
             adjustment,
+            duplicate: false,
+            dry_run: false,
         })
     }
 
@@ -145,8 +223,16 @@ mod tests {
             observed: observed.into(),
             source: Some("chain".into()),
             ts: None,
-            adjust: true,
+            adjust: false,
+            dry_run: false,
             actor: Some("claude".into()),
+        }
+    }
+
+    fn adjusting(observed: &str) -> ReconcileRequest {
+        ReconcileRequest {
+            adjust: true,
+            ..rreq(observed)
         }
     }
 
@@ -154,7 +240,8 @@ mod tests {
     fn posts_adjustment_so_book_matches_observed() {
         let mut l = ledger_with(&[("w", "USDC", 6)]);
         l.add(&req("w", "126.2", Kind::Deposit)).unwrap();
-        let r = l.reconcile(&rreq("124.70")).unwrap();
+        let r = l.reconcile(&adjusting("124.70")).unwrap();
+        assert!(!r.duplicate && !r.dry_run);
         assert_eq!(r.snapshot.observed, "124.700000");
         assert_eq!(r.snapshot.book, "126.200000");
         assert_eq!(r.snapshot.diff, "-1.500000");
@@ -176,22 +263,161 @@ mod tests {
     }
 
     #[test]
-    fn zero_diff_and_no_adjust_write_no_entry() {
+    fn zero_diff_and_the_default_write_no_entry() {
         let mut l = ledger_with(&[("w", "USDC", 6)]);
         l.add(&req("w", "10", Kind::Deposit)).unwrap();
-        let same = l.reconcile(&rreq("10")).unwrap();
+        let same = l.reconcile(&adjusting("10")).unwrap();
         assert!(same.adjustment.is_none());
         assert_eq!(same.snapshot.diff, "0.000000");
-        let skipped = l
-            .reconcile(&ReconcileRequest {
-                adjust: false,
-                ..rreq("12")
-            })
-            .unwrap();
-        assert!(skipped.adjustment.is_none());
-        assert_eq!(skipped.snapshot.diff, "2.000000");
+        // Without --adjust a nonzero diff is recorded on the snapshot and nothing else happens.
+        let observed = l.reconcile(&rreq("12")).unwrap();
+        assert!(observed.adjustment.is_none());
+        assert_eq!(observed.snapshot.diff, "2.000000");
+        assert!(observed.snapshot.adjustment_entry_id.is_none());
         assert_eq!(l.balance("w", None).unwrap().balance, "10.000000");
         assert_eq!(l.snapshots("w", 0).unwrap().snapshots.len(), 2);
+    }
+
+    #[test]
+    fn dry_run_reports_the_diff_and_writes_nothing() {
+        let mut l = ledger_with(&[("w", "USDC", 6)]);
+        l.add(&AddRequest {
+            ts: Some("2026-09-08T09:00:00Z".into()),
+            ..req("w", "10", Kind::Deposit)
+        })
+        .unwrap();
+        let r = l
+            .reconcile(&ReconcileRequest {
+                dry_run: true,
+                adjust: true,
+                ts: Some("2026-09-08T10:00:00Z".into()),
+                ..rreq("12.5")
+            })
+            .unwrap();
+        assert!(r.dry_run);
+        assert!(!r.duplicate);
+        assert_eq!(r.snapshot.id, None);
+        assert_eq!(r.snapshot.ts, "2026-09-08T10:00:00.000Z");
+        assert_eq!(r.snapshot.observed, "12.500000");
+        assert_eq!(r.snapshot.book, "10.000000");
+        assert_eq!(r.snapshot.diff, "2.500000");
+        assert_eq!(r.snapshot.source.as_deref(), Some("chain"));
+        assert!(r.adjustment.is_none());
+        assert!(l.snapshots("w", 0).unwrap().snapshots.is_empty());
+        assert_eq!(l.balance("w", None).unwrap().balance, "10.000000");
+        assert_eq!(l.balances().unwrap()[0].entries, 1);
+    }
+
+    #[test]
+    fn same_observation_at_the_same_time_is_a_duplicate() {
+        let mut l = ledger_with(&[("w", "USDC", 6)]);
+        l.add(&AddRequest {
+            ts: Some("2026-09-08T09:00:00Z".into()),
+            ..req("w", "10", Kind::Deposit)
+        })
+        .unwrap();
+        let at = || ReconcileRequest {
+            ts: Some("2026-09-08T10:00:00Z".into()),
+            ..rreq("9.5")
+        };
+        let first = l.reconcile(&at()).unwrap();
+        assert!(!first.duplicate);
+        let again = l.reconcile(&at()).unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.snapshot.id, first.snapshot.id);
+        assert_eq!(again.snapshot.diff, "-0.500000");
+        assert_eq!(l.snapshots("w", 0).unwrap().snapshots.len(), 1);
+        // A dry run of the same observation says so without writing.
+        let peek = l
+            .reconcile(&ReconcileRequest {
+                dry_run: true,
+                ..at()
+            })
+            .unwrap();
+        assert!(peek.dry_run && peek.duplicate);
+        assert_eq!(peek.snapshot.id, None);
+        assert_eq!(l.snapshots("w", 0).unwrap().snapshots.len(), 1);
+    }
+
+    #[test]
+    fn observe_then_adjust_at_the_same_time_is_not_a_duplicate() {
+        let mut l = ledger_with(&[("w", "USDC", 6)]);
+        l.add(&AddRequest {
+            ts: Some("2026-09-08T09:00:00Z".into()),
+            ..req("w", "10", Kind::Deposit)
+        })
+        .unwrap();
+        let ts = Some("2026-09-08T10:00:00Z".to_string());
+        let looked = l
+            .reconcile(&ReconcileRequest {
+                ts: ts.clone(),
+                ..rreq("9.5")
+            })
+            .unwrap();
+        assert!(looked.adjustment.is_none());
+        let fixed = l
+            .reconcile(&ReconcileRequest {
+                ts: ts.clone(),
+                ..adjusting("9.5")
+            })
+            .unwrap();
+        assert!(!fixed.duplicate);
+        let adj = fixed.adjustment.expect("adjustment posted");
+        assert_eq!(adj.amount, "-0.500000");
+        assert_eq!(fixed.snapshot.adjustment_entry_id, Some(adj.id));
+        assert_eq!(l.snapshots("w", 0).unwrap().snapshots.len(), 2);
+        assert_eq!(l.balance("w", None).unwrap().balance, "9.500000");
+        // Replaying the adjusting call: the book now equals observed, so it is a fresh
+        // zero-diff snapshot, and replaying that one is a duplicate.
+        let replay = l
+            .reconcile(&ReconcileRequest {
+                ts: ts.clone(),
+                ..adjusting("9.5")
+            })
+            .unwrap();
+        assert!(!replay.duplicate);
+        assert_eq!(replay.snapshot.diff, "0.000000");
+        assert!(replay.adjustment.is_none());
+        let replay2 = l
+            .reconcile(&ReconcileRequest {
+                ts,
+                ..adjusting("9.5")
+            })
+            .unwrap();
+        assert!(replay2.duplicate);
+        assert_eq!(replay2.snapshot.id, replay.snapshot.id);
+        assert_eq!(l.snapshots("w", 0).unwrap().snapshots.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_needs_the_same_book_and_source() {
+        let mut l = ledger_with(&[("w", "USD", 2)]);
+        l.add(&AddRequest {
+            ts: Some("2026-09-01".into()),
+            ..req("w", "10", Kind::Deposit)
+        })
+        .unwrap();
+        let at = |source: Option<&str>| ReconcileRequest {
+            ts: Some("2026-09-08T10:00:00Z".into()),
+            source: source.map(str::to_string),
+            ..rreq("10")
+        };
+        l.reconcile(&at(None)).unwrap();
+        assert!(
+            l.reconcile(&at(None)).unwrap().duplicate,
+            "null source matches null"
+        );
+        assert!(!l.reconcile(&at(Some("chain"))).unwrap().duplicate);
+        // A back-dated entry changes the book as of that time, so the same observation is new.
+        l.add(&AddRequest {
+            ts: Some("2026-09-02".into()),
+            ..req("w", "-1", Kind::Fee)
+        })
+        .unwrap();
+        let r = l.reconcile(&at(None)).unwrap();
+        assert!(!r.duplicate);
+        assert_eq!(r.snapshot.book, "9.00");
+        assert_eq!(l.snapshots("w", 0).unwrap().snapshots.len(), 3);
     }
 
     #[test]
@@ -210,7 +436,7 @@ mod tests {
         let r = l
             .reconcile(&ReconcileRequest {
                 ts: Some("2026-09-02".into()),
-                ..rreq("9")
+                ..adjusting("9")
             })
             .unwrap();
         assert_eq!(r.snapshot.book, "10.00");
@@ -246,17 +472,17 @@ mod tests {
         // 09-01 sees book 5 and posts -5; the later two see book 0 and post nothing.
         l.reconcile(&ReconcileRequest {
             ts: Some("2026-09-01".into()),
-            ..rreq("0")
+            ..adjusting("0")
         })
         .unwrap();
         l.reconcile(&ReconcileRequest {
             ts: Some("2026-09-02".into()),
-            ..rreq("0")
+            ..adjusting("0")
         })
         .unwrap();
         l.reconcile(&ReconcileRequest {
             ts: Some("2026-09-03".into()),
-            ..rreq("0")
+            ..adjusting("0")
         })
         .unwrap();
         let s = l.snapshots("w", 2).unwrap();

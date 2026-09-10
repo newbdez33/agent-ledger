@@ -205,13 +205,17 @@ pub struct ReconcileArgs {
     /// Where the observation came from (polygon-rpc, kalshi-api, ...)
     #[arg(long)]
     pub source: Option<String>,
-    /// Record the snapshot but do not post an adjustment entry
-    #[arg(long)]
-    pub no_adjust: bool,
-    /// When the balance was observed; the book is compared as of this time.
-    /// Default: now, or the latest booked entry if that is later
+    /// When the balance was observed; the book is compared as of this time. Pass it so a retry
+    /// is a duplicate. Default: now, or the latest booked entry if that is later
     #[arg(long)]
     pub ts: Option<String>,
+    /// Post an adjustment entry for a nonzero diff. Default: record the snapshot only, since a
+    /// diff is usually activity not booked yet
+    #[arg(long, conflicts_with = "dry_run")]
+    pub adjust: bool,
+    /// Report observed, book and diff; write nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
