@@ -45,17 +45,23 @@ pub enum Command {
     /// List entries of an account with running balance
     History(HistoryArgs),
     /// Show every entry in a group across accounts
-    Group { id: String },
+    Group {
+        /// Group id, as given to --group
+        id: String,
+    },
     /// Realized PnL, excluding deposits, withdrawals and transfers
     Pnl(PnlArgs),
-    /// Compare book balance with an observed balance and post an adjustment
+    /// Compare the book with an observed balance and record a snapshot; --adjust posts the difference
     Reconcile(ReconcileArgs),
     /// List reconciliation snapshots
     Snapshots(SnapshotsArgs),
     /// Import entries from JSON Lines on stdin
     Import(ImportArgs),
     /// Show one entry
-    Show { entry_id: i64 },
+    Show {
+        /// Entry id, as printed by add, history or group
+        entry_id: i64,
+    },
     /// Dump an account's entries
     Export(ExportArgs),
 }
@@ -158,6 +164,7 @@ pub struct BalanceArgs {
 
 #[derive(Args, Debug)]
 pub struct HistoryArgs {
+    /// Account name
     pub account: String,
     /// Most recent N entries; 0 for all
     #[arg(long, default_value_t = 50)]
@@ -198,6 +205,7 @@ pub struct PnlArgs {
 
 #[derive(Args, Debug)]
 pub struct ReconcileArgs {
+    /// Account name
     pub account: String,
     /// Balance you actually observed at the venue or on chain
     #[arg(long, allow_negative_numbers = true)]
@@ -205,17 +213,27 @@ pub struct ReconcileArgs {
     /// Where the observation came from (polygon-rpc, kalshi-api, ...)
     #[arg(long)]
     pub source: Option<String>,
-    /// Record the snapshot but do not post an adjustment entry
-    #[arg(long)]
-    pub no_adjust: bool,
-    /// When the balance was observed; the book is compared as of this time.
-    /// Default: now, or the latest booked entry if that is later
+    /// When the balance was observed; the book is compared as of this time. Pass it so an
+    /// unchanged retry is a duplicate. Default: now, or the latest booked entry if that is later
     #[arg(long)]
     pub ts: Option<String>,
+    /// Post an adjustment entry for a nonzero diff (a nonzero diff always posts; a retry then
+    /// finds diff 0 and posts nothing). Default: record the snapshot only, since a diff is usually activity
+    /// not booked yet
+    #[arg(long, conflicts_with = "dry_run")]
+    pub adjust: bool,
+    /// Why the adjustment is right (what the venue said); appended to its memo, dropped when
+    /// nothing is posted
+    #[arg(long, requires = "adjust")]
+    pub memo: Option<String>,
+    /// Report observed, book and diff; write nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct SnapshotsArgs {
+    /// Account name
     pub account: String,
     /// Most recent N snapshots; 0 for all
     #[arg(long, default_value_t = 50)]
@@ -231,6 +249,7 @@ pub struct ImportArgs {
 
 #[derive(Args, Debug)]
 pub struct ExportArgs {
+    /// Account name
     pub account: String,
     #[arg(long, value_enum)]
     pub format: ExportFormat,

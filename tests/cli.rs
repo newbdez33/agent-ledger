@@ -385,6 +385,7 @@ fn group_pnl_reconcile_and_snapshots_flow() {
                 "54.5",
                 "--source",
                 "chain",
+                "--adjust",
             ])
             .output()
             .unwrap()
@@ -741,4 +742,165 @@ fn reversal_copies_ts_group_and_meta_so_every_view_nets_to_zero() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["bucket"], "dir");
     assert_eq!(rows[0]["net"], "0.000000");
+}
+
+#[test]
+fn reconcile_observes_by_default_adjusts_on_request_and_dry_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l.db");
+    with_account(&db);
+    ledger(&db)
+        .args([
+            "add",
+            "poly-usdc",
+            "10",
+            "--kind",
+            "deposit",
+            "--ts",
+            "2026-09-08T09:00:00Z",
+        ])
+        .assert()
+        .success();
+    let reconcile = |extra: &[&str]| {
+        let mut args = vec![
+            "--json",
+            "reconcile",
+            "poly-usdc",
+            "--observed",
+            "9.5",
+            "--source",
+            "chain",
+            "--ts",
+            "2026-09-08T10:00:00Z",
+        ];
+        args.extend_from_slice(extra);
+        ledger(&db).args(args).output().unwrap()
+    };
+    let balance = || {
+        json(
+            &ledger(&db)
+                .args(["--json", "balance", "poly-usdc"])
+                .output()
+                .unwrap()
+                .stdout,
+        )["balance"]
+            .clone()
+    };
+    let snapshots = || {
+        json(
+            &ledger(&db)
+                .args(["--json", "snapshots", "poly-usdc"])
+                .output()
+                .unwrap()
+                .stdout,
+        )["snapshots"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+
+    // Default: the diff is recorded on a snapshot and nothing else is written.
+    let first = json(&reconcile(&[]).stdout);
+    assert_eq!(first["snapshot"]["diff"], "-0.500000");
+    assert!(first["snapshot"]["id"].is_number());
+    assert_eq!(first["adjustment"], Value::Null);
+    assert_eq!(first["duplicate"], false);
+    assert_eq!(first["dry_run"], false);
+    assert_eq!(balance(), "10.000000");
+
+    // The same observation again is a duplicate of that snapshot.
+    let again = json(&reconcile(&[]).stdout);
+    assert_eq!(again["duplicate"], true);
+    assert_eq!(again["snapshot"]["id"], first["snapshot"]["id"]);
+    assert_eq!(snapshots(), 1);
+
+    // A dry run computes and writes nothing; its snapshot has no id.
+    let peek = json(
+        &ledger(&db)
+            .args([
+                "--json",
+                "reconcile",
+                "poly-usdc",
+                "--observed",
+                "9.4",
+                "--ts",
+                "2026-09-08T10:05:00Z",
+                "--dry-run",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(peek["dry_run"], true);
+    assert_eq!(peek["snapshot"]["id"], Value::Null);
+    assert_eq!(peek["snapshot"]["diff"], "-0.600000");
+    assert_eq!(peek["adjustment"], Value::Null);
+    assert_eq!(snapshots(), 1);
+
+    // Observe, decide, adjust: the same observation with --adjust posts the adjustment.
+    let fixed = json(&reconcile(&["--adjust"]).stdout);
+    assert_eq!(fixed["duplicate"], false);
+    assert_eq!(fixed["adjustment"]["kind"], "adjustment");
+    assert_eq!(fixed["adjustment"]["amount"], "-0.500000");
+    assert_eq!(balance(), "9.500000");
+    assert_eq!(snapshots(), 2);
+
+    // The table points a human at --adjust when a diff is left standing.
+    let table = ledger(&db)
+        .args([
+            "reconcile",
+            "poly-usdc",
+            "--observed",
+            "9.0",
+            "--ts",
+            "2026-09-08T11:00:00Z",
+        ])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&table.stdout).contains("--adjust"));
+
+    // --memo rides on the adjustment; it needs --adjust.
+    let why = json(
+        &ledger(&db)
+            .args([
+                "--json",
+                "reconcile",
+                "poly-usdc",
+                "--observed",
+                "9.0",
+                "--ts",
+                "2026-09-08T11:00:00Z",
+                "--adjust",
+                "--memo",
+                "support: on-chain fee",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        why["adjustment"]["memo"],
+        "reconcile: observed 9.000000, book 9.500000; support: on-chain fee"
+    );
+    ledger(&db)
+        .args(["reconcile", "poly-usdc", "--observed", "1", "--memo", "x"])
+        .assert()
+        .code(1);
+
+    // --no-adjust is gone, and --adjust with --dry-run is a usage error.
+    ledger(&db)
+        .args(["reconcile", "poly-usdc", "--observed", "1", "--no-adjust"])
+        .assert()
+        .code(1);
+    ledger(&db)
+        .args([
+            "reconcile",
+            "poly-usdc",
+            "--observed",
+            "1",
+            "--adjust",
+            "--dry-run",
+        ])
+        .assert()
+        .code(1);
 }

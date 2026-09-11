@@ -146,9 +146,12 @@ pub fn render(out: &Output) -> String {
         }
         Output::Reconcile(r) => {
             let s = &r.snapshot;
+            let head = match s.id {
+                Some(id) => format!("snapshot {id}"),
+                None => "dry run".to_string(),
+            };
             let mut out = format!(
-                "snapshot {} {}: observed {} book {} diff {}{}\n",
-                s.id,
+                "{head} {}: observed {} book {} diff {}{}{}\n",
                 s.ts,
                 s.observed,
                 s.book,
@@ -156,11 +159,21 @@ pub fn render(out: &Output) -> String {
                 s.source
                     .as_ref()
                     .map(|src| format!(" ({src})"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                if r.duplicate {
+                    "  (duplicate: already recorded)"
+                } else {
+                    ""
+                }
             );
+            let diff_is_zero = s.diff.chars().all(|c| matches!(c, '0' | '.' | '-'));
             match &r.adjustment {
                 Some(e) => out.push_str(&entries_table(std::slice::from_ref(e), false)),
-                None => out.push_str("no adjustment posted\n"),
+                None if r.dry_run => out.push_str("nothing written\n"),
+                None if diff_is_zero => out.push_str("no adjustment posted\n"),
+                None => out.push_str(
+                    "no adjustment posted; book the missing activity, or pass --adjust to post the diff\n",
+                ),
             }
             out
         }
@@ -178,7 +191,7 @@ pub fn render(out: &Output) -> String {
                 .iter()
                 .map(|s| {
                     vec![
-                        s.id.to_string(),
+                        s.id.map(|v| v.to_string()).unwrap_or_default(),
                         s.ts.clone(),
                         s.observed.clone(),
                         s.book.clone(),

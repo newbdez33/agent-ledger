@@ -132,7 +132,8 @@ pub struct HistoryEntry {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
-    pub id: i64,
+    /// `None` on a dry run, which records nothing.
+    pub id: Option<i64>,
     pub account: String,
     pub ts: String,
     pub observed: String,
@@ -224,6 +225,10 @@ pub struct AccountPnl {
 pub struct ReconcileResult {
     pub snapshot: Snapshot,
     pub adjustment: Option<Entry>,
+    /// The same observation (ts, observed, book, source) was already on record; nothing written.
+    pub duplicate: bool,
+    /// `--dry-run`: observed, book and diff were computed and nothing was written.
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

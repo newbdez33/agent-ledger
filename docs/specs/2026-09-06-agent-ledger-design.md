@@ -148,7 +148,9 @@ Entries without `--ref` are never deduplicated.
 
 **Reversal.** `reverse <entry-id>` writes a `reversal` entry on the same account with `amount = -original.amount`, `reverses_id = original.id`, and the original's `ts`, `group_id` and `meta`; `recorded_at` is the moment of the reversal. The mistake therefore nets to zero in every view (`balance --at`, `history`, `pnl` by day, group or meta key) while the audit trail keeps when it was corrected. If the original is a `transfer` leg, its sibling leg is reversed in the same transaction, because a transfer is one movement. `reverse --group <id>` reverses every entry in the group that is neither a reversal nor already reversed, in one transaction; `nothing_to_reverse` if there are none. Rejected when a target is itself a `reversal` (`cannot_reverse_reversal`) or already has a reversal (`already_reversed`, guaranteed by the unique index). To undo a reversal, add the entry again.
 
-**Reconcile.** `reconcile <account> --observed <amount> [--ts <t>]` runs in one transaction. `t` defaults to now or the account's latest entry `ts`, whichever is later, so an implicit reconcile always compares against the whole book even when venue timestamps run ahead of this machine's clock; an explicit `--ts` is the only way to reconcile historically. Then: `book = SUM(amount) WHERE ts <= t`, `diff = observed - book`, insert a snapshot at `t`. If `diff != 0` and `--no-adjust` is absent, insert an `adjustment` entry with `amount = diff`, `ts = t`, memo `reconcile: observed <o>, book <b>`, and store its id in `snapshot.adjustment_entry_id`; the adjustment is inserted before the snapshot row because snapshots are append-only. The book balance as of `t` therefore equals the observed balance after every reconcile unless the caller opts out. `snapshots <account>` lists past snapshots.
+**Reconcile.** `reconcile <account> --observed <amount> [--source <s>] [--ts <t>] [--adjust [--memo <why>]] [--dry-run]` runs in one transaction. `t` defaults to now or the account's latest entry `ts`, whichever is later, so an implicit reconcile always compares against the whole book even when venue timestamps run ahead of this machine's clock; an explicit `--ts` is the only way to reconcile historically. Then: `book = SUM(amount) WHERE ts <= t`, `diff = observed - book`, insert a snapshot at `t` carrying `diff`. Nothing else is written by default: in a live loop a nonzero diff is usually activity the caller has not booked yet, and an automatic adjustment would absorb it and then compound once the real entries arrive. With `--adjust` and `diff != 0`, insert an `adjustment` entry with `amount = diff`, `ts = t`, memo `reconcile: observed <o>, book <b>` followed by `; <why>` when `--memo` is given (`--memo` requires `--adjust`), and store its id in `snapshot.adjustment_entry_id`; the adjustment is inserted before the snapshot row because snapshots are append-only, and the book as of `t` then equals the observed balance. With `--dry-run` nothing is written: the result carries the computed `ts`, `observed`, `book` and `diff` with `snapshot.id = null` and `dry_run: true`; `--dry-run` and `--adjust` together are a usage error.
+
+A snapshot is the fact "source `s` observed `o` at `t` against book `b`", and the same fact is never stored twice: a call that would post no adjustment and whose `(ts, observed, book, source)` equals an existing snapshot of the account writes nothing and returns that snapshot with `duplicate: true` (its adjustment, if it has one). A call with `--adjust` and a nonzero diff is never a duplicate, so observing first and adjusting later at the same `--ts` works. Because `book` is part of the identity, a replay after an adjustment, or after a back-dated entry, records a new snapshot. A dry run reports `duplicate` the same way. `snapshots <account>` lists past snapshots.
 
 **Balance.** `balance` lists every account with its current balance. `balance <account> [--at <ts>]` sums entries with `ts <= at`. Both use `ts`, not `recorded_at`.
 
@@ -188,7 +190,7 @@ ledger [--db <path>] [--json] [--actor <name>] <command>
   group <id>
   pnl [<account>] [--since <rfc3339>] [--until <rfc3339>] [--by total|day|week|month|group|meta:<key>]
       [--marks <file>]
-  reconcile <account> --observed <amount> [--source <text>] [--no-adjust] [--ts <rfc3339>]
+  reconcile <account> --observed <amount> [--source <text>] [--ts <rfc3339>] [--adjust [--memo <text>]] [--dry-run]
   snapshots <account> [--limit <n>]
   import [--dry-run]
   show <entry-id>
@@ -233,7 +235,7 @@ The entry object, used everywhere an entry appears:
 | `history`, `export --format json` | `{account, currency, entries: [entry + balance_after, …]}` |
 | `group` | `{group, entries: [entry, …], net: {"USDC": "3.000000", "USD": "-52.00"}}` |
 | `pnl` | `{accounts: [{account, currency, rows: [{bucket, trades, settlements, fees, adjustments, other, net, open_value, mtm}, …]}, …]}`; `open_value` is `null` and `mtm` equals `net` unless `--marks` valued a group in the row |
-| `reconcile` | `{snapshot, adjustment}` with `adjustment` an entry or `null` |
+| `reconcile` | `{snapshot, adjustment, duplicate, dry_run}` with `adjustment` an entry or `null`; `snapshot.id` is `null` on a dry run |
 | `snapshots` | `{account, snapshots: [{id, ts, observed, book, diff, adjustment_entry_id, source}, …]}` |
 | `import` | `{imported, duplicates, dry_run, entries: [entry, …]}` |
 
@@ -277,7 +279,7 @@ Library tests run against a temporary database file:
 - reversal: negates, links, inherits ts, group and meta so day and meta buckets net to zero; second reversal rejected; reversing a reversal rejected; reversing one transfer leg reverses the sibling; `--group` reverses only unreversed non-reversal entries and errors when nothing is left.
 - append-only: `UPDATE` and `DELETE` on `entries` and `snapshots` fail with the trigger message.
 - transfer: atomic two-leg write; currency mismatch rejected; nothing written on failure; generated group id when none given.
-- reconcile: snapshot stored, adjustment equals diff, `--no-adjust` writes no entry, zero diff writes no entry, `--ts` computes book as of that time.
+- reconcile: snapshot stored with the diff and no entry by default; `--adjust` posts an adjustment equal to diff with `--memo` appended to its memo, zero diff posts none; `--dry-run` reports the diff and writes nothing; a repeat of the same ts, observed, book and source that posts nothing is a duplicate, observe then `--adjust` at the same ts is not, a changed book is not; `--ts` computes book as of that time.
 - precision: 7 decimals on a 6-decimal account rejected; 6 accepted exactly.
 - history: running balance correct under `--limit`, `--since`, `--group` filters; `--limit 0` unlimited.
 - group: cross-account entries, per-currency nets, fully reversed group nets to zero.
@@ -298,7 +300,7 @@ Recorded from the design conversation on 2026-09-06:
 | accounts | multiple accounts, each with its own currency and decimals |
 | bookkeeping | single-entry signed amounts per account, not double-entry |
 | mutability | append-only, corrections only by reversal entries |
-| reconciliation | snapshot plus automatic adjustment entry, opt-out with `--no-adjust` |
+| reconciliation | snapshot always; adjustment entry only with `--adjust` (automatic until 0.2, see the live-loop row below) |
 | idempotency | optional `--ref` unique per account; conflict on mismatched amount |
 | amount storage | integer minor units with per-account decimals |
 | repository | standalone public repo `agent-ledger`, Rust, binary `ledger`, MIT |
@@ -325,5 +327,12 @@ Added after the first full trading day, 2026-09-06 (issue #4):
 | open groups read as losses in `pnl`; agents joined venue values by hand | `pnl --marks <file>` takes caller-supplied values per group and adds `open_value` and `mtm` to every row; marks are never stored and the ledger still computes no valuation |
 | stored marks (`ledger mark`) and group open/closed state | deferred; the read-time join covers the reported case, and a stored-mark table could feed the same output shape later |
 | a reversal dated `now` without meta left `balance --at`, `--by day` and `--by meta:<key>` off by the reversed amount between mistake and correction, and `reconcile --ts` at a time in that window posted a phantom adjustment (skill re-test) | a reversal copies the original's `ts`, `group` and `meta`; `recorded_at` keeps the correction time |
+
+Added from poly's live loop, 2026-09-10 (issues #9 and #3):
+
+| gap | decision |
+|---|---|
+| the automatic adjustment absorbed fills that were not booked yet, and the next reconcile compounded the error (#9) | `reconcile` records the snapshot only; `--adjust` posts the adjustment; `--dry-run` writes nothing; `--no-adjust` removed |
+| retries of a successful reconcile appended identical snapshots (#3) | a snapshot is one fact `(ts, observed, book, source)`; recording it again returns the existing row with `duplicate: true` unless the call posts an adjustment |
 
 Known caveat: the binary name `ledger` collides with ledger-cli if that is installed. Rename the installed binary in that case; the skill refers to the command by name, so update it too.
