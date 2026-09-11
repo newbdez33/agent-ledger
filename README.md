@@ -4,7 +4,7 @@ An append-only, SQLite-backed ledger that AI agents drive from the shell.
 
 Agents that move money have wallets but no books. A wallet says what the balance is; it does not say why it changed, or whether what the agent thinks happened matches what the chain or exchange reports. `ledger` is the book: one binary, one file, JSON in and out, idempotent writes, and an audit trail that no caller can rewrite.
 
-**Status:** v0.1, usable. `make install` builds the binary and links the companion skill. Design: [docs/specs/2026-09-06-agent-ledger-design.md](docs/specs/2026-09-06-agent-ledger-design.md).
+**Status:** v0.2, usable. Since v0.1: `pnl --marks` for mark-to-market, `reconcile` observes by default (`--adjust`, `--dry-run`, `--memo`, no duplicate snapshots), reversals mirror the original's `ts`, `group` and `meta`, the entry field is `group` in JSON and CSV, `account add` is idempotent. Consumers of 0.1 read `group` instead of `group_id` and pass `--adjust` where they relied on the automatic adjustment. `make install` builds the binary and links the companion skill. Design: [docs/specs/2026-09-06-agent-ledger-design.md](docs/specs/2026-09-06-agent-ledger-design.md).
 
 ## Install
 
@@ -19,7 +19,7 @@ ledger --help
 To pin a version without cloning (binary only, no skill symlink):
 
 ```sh
-cargo install --git https://github.com/newbdez33/agent-ledger --tag v0.1.0
+cargo install --git https://github.com/newbdez33/agent-ledger --tag v0.2.0
 ```
 
 Every command takes `--json`. The database lives at `--db PATH`, else `$LEDGER_DB`, else `~/.agent-ledger/ledger.db`. Set `LEDGER_ACTOR` so the audit trail says who wrote each row.

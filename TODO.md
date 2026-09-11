@@ -1,6 +1,6 @@
 # agent-ledger — TODO
 
-Open work is tracked as GitHub issues; this file is the map. Shipped: **v0.1** (2026-09-06) — spec, CLI, tests, skill.
+Open work is tracked as GitHub issues; this file is the map. Shipped: **v0.1** (2026-09-06) — spec, CLI, tests, skill. **v0.2** (2026-09-12) — `pnl --marks`, observe-first `reconcile` with `--adjust`/`--dry-run`/`--memo` and duplicate-free snapshots, reversals mirror the original, `group` field in JSON and CSV, idempotent `account add`.
 
 ## Next
 
