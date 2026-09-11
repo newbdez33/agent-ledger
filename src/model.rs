@@ -113,6 +113,9 @@ pub struct Entry {
     pub reference: Option<String>,
     pub memo: Option<String>,
     pub actor: Option<String>,
+    /// The `group_id` column; serialized as `group` to match `--group`, `group <id>` and
+    /// `pnl --by group`.
+    #[serde(rename = "group")]
     pub group_id: Option<String>,
     pub meta: Option<serde_json::Value>,
     pub reverses_id: Option<i64>,

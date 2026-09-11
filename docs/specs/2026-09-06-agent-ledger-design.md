@@ -146,7 +146,7 @@ Entries without `--ref` are never deduplicated.
 
 **Transfer.** `transfer <from> <to> <amount>` requires a positive amount and two accounts with the same `currency`. It writes two `transfer` entries in one transaction: `-amount` on `from`, `+amount` on `to`, sharing a `group_id`. With `--ref`, both legs carry the ref. On replay, if both legs already exist with matching amounts the call returns them with `"duplicate": true`; if only one leg exists, or an amount differs, it is `ref_conflict` and nothing is written. Moving value between currencies (USDC on Polygon to USD at Kalshi) is not a transfer; it is a `withdrawal` on one account and a `deposit` on the other, optionally sharing a `--group`.
 
-**Reversal.** `reverse <entry-id>` writes a `reversal` entry on the same account with `amount = -original.amount`, `reverses_id = original.id`, and the original's `ts`, `group_id` and `meta`; `recorded_at` is the moment of the reversal. The mistake therefore nets to zero in every view (`balance --at`, `history`, `pnl` by day, group or meta key) while the audit trail keeps when it was corrected. If the original is a `transfer` leg, its sibling leg is reversed in the same transaction, because a transfer is one movement. `reverse --group <id>` reverses every entry in the group that is neither a reversal nor already reversed, in one transaction; `nothing_to_reverse` if there are none. Rejected when a target is itself a `reversal` (`cannot_reverse_reversal`) or already has a reversal (`already_reversed`, guaranteed by the unique index). To undo a reversal, add the entry again.
+**Reversal.** `reverse <entry-id>` writes a `reversal` entry on the same account with `amount = -original.amount`, `reverses_id = original.id`, and the original's `ts`, `group` and `meta`; `recorded_at` is the moment of the reversal. The mistake therefore nets to zero in every view (`balance --at`, `history`, `pnl` by day, group or meta key) while the audit trail keeps when it was corrected. If the original is a `transfer` leg, its sibling leg is reversed in the same transaction, because a transfer is one movement. `reverse --group <id>` reverses every entry in the group that is neither a reversal nor already reversed, in one transaction; `nothing_to_reverse` if there are none. Rejected when a target is itself a `reversal` (`cannot_reverse_reversal`) or already has a reversal (`already_reversed`, guaranteed by the unique index). To undo a reversal, add the entry again.
 
 **Reconcile.** `reconcile <account> --observed <amount> [--source <s>] [--ts <t>] [--adjust [--memo <why>]] [--dry-run]` runs in one transaction. `t` defaults to now or the account's latest entry `ts`, whichever is later, so an implicit reconcile always compares against the whole book even when venue timestamps run ahead of this machine's clock; an explicit `--ts` is the only way to reconcile historically. Then: `book = SUM(amount) WHERE ts <= t`, `diff = observed - book`, insert a snapshot at `t` carrying `diff`. Nothing else is written by default: in a live loop a nonzero diff is usually activity the caller has not booked yet, and an automatic adjustment would absorb it and then compound once the real entries arrive. With `--adjust` and `diff != 0`, insert an `adjustment` entry with `amount = diff`, `ts = t`, memo `reconcile: observed <o>, book <b>` followed by `; <why>` when `--memo` is given (`--memo` requires `--adjust`), and store its id in `snapshot.adjustment_entry_id`; the adjustment is inserted before the snapshot row because snapshots are append-only, and the book as of `t` then equals the observed balance. With `--dry-run` nothing is written: the result carries the computed `ts`, `observed`, `book` and `diff` with `snapshot.id = null` and `dry_run: true`; `--dry-run` and `--adjust` together are a usage error.
 
@@ -168,7 +168,7 @@ With `--marks <file>`, a JSON object of group id to amount string (`{"farm:whist
  "meta":{"market":"btc-5m-0310","side":"buy","price":"0.51","shares":"50"}}
 ```
 
-`account`, `amount`, `kind` are required; `amount` must be a JSON string (JSON numbers are floats and are rejected as `invalid_amount`). `ref`, `ts`, `group`, `memo`, `meta`, `actor` are optional and mean what the `add` flags mean. Every line is validated, then all lines are applied in one transaction with the same rules as `add`, including ref idempotency. A duplicate is skipped and counted; any error rolls back the whole batch and reports the line number. `--dry-run` runs the transaction and rolls it back, reporting what would have happened. Only `add` kinds are importable; transfers are not.
+`account`, `amount`, `kind` are required; `amount` must be a JSON string (JSON numbers are floats and are rejected as `invalid_amount`). `ref`, `ts`, `group`, `memo`, `meta`, `actor` are optional and mean what the `add` flags mean; `group_id` is accepted as an alias of `group`, so a 0.1 export loads unchanged. Unknown fields (`id`, `currency`, `balance_after`, ...) are ignored, so each entry object of `export --format json` is a valid import line, except `transfer` and `reversal` entries, which `import` rejects as it always did. Every line is validated, then all lines are applied in one transaction with the same rules as `add`, including ref idempotency. A duplicate is skipped and counted; any error rolls back the whole batch and reports the line number. `--dry-run` runs the transaction and rolls it back, reporting what would have happened. Only `add` kinds are importable; transfers are not.
 
 **Actor.** `--actor <name>` overrides the `LEDGER_ACTOR` environment variable; when neither is set, `actor` is null. It records who wrote the row (`claude`, `poly-trader`, `backfill`), not who owns the money.
 
@@ -200,7 +200,7 @@ ledger [--db <path>] [--json] [--actor <name>] <command>
 - `<amount>` is a decimal with an optional leading `-`. An unsigned amount is positive. The positional accepts negative numbers (`clap` `allow_negative_numbers`).
 - `--decimals` defaults to 2. Agents creating a stablecoin account pass `--decimals 6` explicitly; the skill says so.
 - `account list` shows accounts (id, name, currency, decimals, note); `balance` shows money. They do not overlap.
-- `export` writes every entry of the account with running balance to stdout; CSV columns are `id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,group_id,meta,reverses_id,reversed_by`, with `meta` as the raw JSON string.
+- `export` writes every entry of the account with running balance to stdout; CSV columns are `id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,group,meta,reverses_id,reversed_by`, with `meta` as the raw JSON string.
 
 ### Output
 
@@ -214,7 +214,7 @@ The entry object, used everywhere an entry appears:
   "ts": "2026-09-06T03:12:45.000Z", "recorded_at": "2026-09-06T03:12:45.117Z",
   "kind": "trade", "amount": "-25.500000",
   "ref": "order-7f3", "memo": "BTC 5m up", "actor": "claude",
-  "group_id": "arb:btc-5m:03:10",
+  "group": "arb:btc-5m:03:10",
   "meta": {"market": "btc-5m-0310", "side": "buy", "price": "0.51", "shares": "50"},
   "reverses_id": null, "reversed_by": null
 }
@@ -334,5 +334,11 @@ Added from poly's live loop, 2026-09-10 (issues #9 and #3):
 |---|---|
 | the automatic adjustment absorbed fills that were not booked yet, and the next reconcile compounded the error (#9) | `reconcile` records the snapshot only; `--adjust` posts the adjustment; `--dry-run` writes nothing; `--no-adjust` removed |
 | retries of a successful reconcile appended identical snapshots (#3) | a snapshot is one fact `(ts, observed, book, source)`; recording it again returns the existing row with `duplicate: true` unless the call posts an adjustment |
+
+Added 2026-09-12 (issue #5):
+
+| gap | decision |
+|---|---|
+| `history --json` said `group_id` while `add --group`, `group <id>` and `pnl --by group` said `group`; `import` read only `group`, so export → import silently dropped every group | the entry object and the CSV header say `group` (the column keeps its name); `import` accepts `group_id` as an alias; breaking for consumers parsing `group_id`, released with 0.2 |
 
 Known caveat: the binary name `ledger` collides with ledger-cli if that is installed. Rename the installed binary in that case; the skill refers to the command by name, so update it too.

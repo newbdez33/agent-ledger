@@ -112,7 +112,8 @@ fn add_balance_history_json_shapes() {
     assert_eq!(v["entries"].as_array().unwrap().len(), 1);
     assert_eq!(v["entries"][0]["balance_after"], "74.500000");
     assert_eq!(v["entries"][0]["meta"]["side"], "buy");
-    assert_eq!(v["entries"][0]["group_id"], "g1");
+    assert_eq!(v["entries"][0]["group"], "g1");
+    assert!(v["entries"][0].get("group_id").is_none());
 }
 
 #[test]
@@ -467,7 +468,7 @@ fn export_csv_header_and_json_shape() {
     let mut lines = text.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,group_id,meta,reverses_id,reversed_by"
+        "id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,group,meta,reverses_id,reversed_by"
     );
     assert!(lines.next().unwrap().contains("\"a, \"\"quoted\"\"\""));
     let v = json(
@@ -709,7 +710,7 @@ fn reversal_copies_ts_group_and_meta_so_every_view_nets_to_zero() {
     );
     let r = &rev["entries"][0];
     assert_eq!(r["ts"], "2026-09-06T09:00:00.000Z");
-    assert_eq!(r["group_id"], "dir:x");
+    assert_eq!(r["group"], "dir:x");
     assert_eq!(r["meta"]["strategy"], "dir");
     assert_eq!(r["amount"], "12.000000");
     assert_ne!(r["recorded_at"], r["ts"]);
@@ -903,4 +904,98 @@ fn reconcile_observes_by_default_adjusts_on_request_and_dry_runs() {
         ])
         .assert()
         .code(1);
+}
+
+#[test]
+fn export_json_round_trips_through_import_with_groups_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.db");
+    let b = dir.path().join("b.db");
+    with_account(&a);
+    with_account(&b);
+    ledger(&a)
+        .args([
+            "add",
+            "poly-usdc",
+            "100",
+            "--kind",
+            "deposit",
+            "--ref",
+            "0xd",
+        ])
+        .assert()
+        .success();
+    ledger(&a)
+        .args([
+            "add",
+            "poly-usdc",
+            "-25.5",
+            "--kind",
+            "trade",
+            "--ref",
+            "o1",
+            "--group",
+            "arb:1",
+            "--meta",
+            r#"{"strategy":"arb"}"#,
+            "--ts",
+            "2026-09-12T09:00:00Z",
+        ])
+        .assert()
+        .success();
+    let exported = json(
+        &ledger(&a)
+            .args(["export", "poly-usdc", "--format", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let entries = exported["entries"].as_array().unwrap();
+    assert_eq!(entries[1]["group"], "arb:1");
+    assert!(entries[1].get("group_id").is_none());
+
+    // The exported entries are valid import lines as they are: one object per line.
+    let lines: String = entries.iter().map(|e| e.to_string() + "\n").collect();
+    let out = ledger(&b)
+        .args(["--json", "import"])
+        .write_stdin(lines)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(json(&out.stdout)["imported"], 2);
+    let g = json(
+        &ledger(&b)
+            .args(["--json", "group", "arb:1"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(g["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(g["entries"][0]["group"], "arb:1");
+    assert_eq!(g["entries"][0]["meta"]["strategy"], "arb");
+
+    // A v0.1.0 export still loads: the old field name is accepted as an alias.
+    let c = dir.path().join("c.db");
+    with_account(&c);
+    let legacy = concat!(
+        r#"{"account":"poly-usdc","amount":"-1","kind":"trade","ref":"o9","group_id":"legacy:1"}"#,
+        "\n"
+    );
+    ledger(&c)
+        .args(["import"])
+        .write_stdin(legacy)
+        .assert()
+        .success();
+    let g = json(
+        &ledger(&c)
+            .args(["--json", "group", "legacy:1"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(g["entries"][0]["group"], "legacy:1");
 }
