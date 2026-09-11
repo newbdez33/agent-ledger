@@ -8,7 +8,7 @@ Open work is tracked as GitHub issues; this file is the map. Shipped: **v0.1** (
 - [x] `account add` idempotent on identical re-run — https://github.com/newbdez33/agent-ledger/issues/2 (from the skill baseline test)
 - [x] `reconcile` retries must not append duplicate snapshots — https://github.com/newbdez33/agent-ledger/issues/3 (from the skill baseline test)
 - [x] `pnl --marks` values open groups and adds `open_value` / `mtm` — https://github.com/newbdez33/agent-ledger/issues/4 (from poly's first trading day)
-- [ ] `group_id` → `group` in every output; export → import keeps groups — https://github.com/newbdez33/agent-ledger/issues/5
+- [x] `group_id` → `group` in every output; export → import keeps groups — https://github.com/newbdez33/agent-ledger/issues/5
 - [x] `reconcile` records the snapshot only; `--adjust` posts, `--dry-run` writes nothing — https://github.com/newbdez33/agent-ledger/issues/9 (from poly's live loop)
 
 ## Waiting on the poly integration

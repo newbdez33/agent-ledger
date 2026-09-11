@@ -19,6 +19,8 @@ struct ImportLine {
     #[serde(rename = "ref")]
     reference: Option<String>,
     ts: Option<String>,
+    /// `group_id` is what 0.1 exports called it; both load.
+    #[serde(alias = "group_id")]
     group: Option<String>,
     memo: Option<String>,
     meta: Option<serde_json::Value>,
@@ -202,5 +204,15 @@ mod tests {
         let twice = "{\"account\":\"poly\",\"amount\":\"1\",\"kind\":\"deposit\",\"ref\":\"x\"}\n{\"account\":\"poly\",\"amount\":\"1\",\"kind\":\"deposit\",\"ref\":\"x\"}\n";
         let r = l.import(twice.as_bytes(), false, None).unwrap();
         assert_eq!((r.imported, r.duplicates), (1, 1));
+    }
+
+    #[test]
+    fn group_id_is_accepted_as_an_alias_for_group() {
+        let mut l = crate::Ledger::open_in_memory().unwrap();
+        l.add_account("poly", "USDC", 6, None).unwrap();
+        let line: &[u8] =
+            b"{\"account\":\"poly\",\"amount\":\"-1\",\"kind\":\"trade\",\"group_id\":\"legacy:1\"}\n";
+        let r = l.import(line, false, None).unwrap();
+        assert_eq!(r.entries[0].group_id.as_deref(), Some("legacy:1"));
     }
 }

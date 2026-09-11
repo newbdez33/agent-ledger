@@ -225,7 +225,7 @@ pub fn render(out: &Output) -> String {
 
 pub fn csv(history: &History) -> String {
     let mut out = String::from(
-        "id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,group_id,meta,reverses_id,reversed_by\n",
+        "id,ts,recorded_at,kind,amount,balance_after,ref,memo,actor,group,meta,reverses_id,reversed_by\n",
     );
     for h in &history.entries {
         let e = &h.entry;
